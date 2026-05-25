@@ -1,0 +1,18 @@
+# Template only. Do not commit local controlled-access paths in paths.local.yml.
+
+project_root: "D:/path/to/JW_research_root"
+biomarker_root: "D:/path/to/JW_research_root/biomarker"
+final_analysis_dir: "D:/path/to/JW_research_root/biomarker/final_analysis"
+
+inputs:
+  rna_tpm: "00_inputs_detected/TPM_young.csv"
+  tss_methylation: "00_inputs_detected/MET_young_batch_JW.csv"
+  clinical: "00_inputs_detected/total_sample_clinical_all.csv"
+  selected_panel: "09_selected_relaxed_union_family6_final_signedMeth/tables/selected_union_biomarker_genes_family6_v18.csv"
+
+validation_tables:
+  depmap_drug: "13_final_manuscript_validation_suite_v5_full_rewrite_raw_depmap_SVS_MAF/tables/depmap_gene_drug_association_joint_AUC_IC50_annotated.csv"
+  dose_response: "13_final_manuscript_validation_suite_v5_full_rewrite_raw_depmap_SVS_MAF/tables/top_gene_dose_response_curve_table.csv"
+  immune: "13_final_manuscript_validation_suite_v5_full_rewrite_raw_depmap_SVS_MAF/tables/immune_gene_correlations_with_TIL_and_TMB.csv"
+  rf_scores: "05_model_output_archive/biomarker_gene_moment_RF_SEM_manual_groups_v2/tables/gene_driver_summary_all_targets.csv"
+

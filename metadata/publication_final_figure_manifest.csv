@@ -1,0 +1,10 @@
+final_panel,final_basename,source_or_object,recommended_use,interpretation_note
+1A,Figure_1A_EOBC_biomarker_activity_heatmap_with_RNA_TSS_coupling,Figure_01A_activity_heatmap_with_rna_meth_correlation_R_v1,Main figure,Tumors are ordered by EOBC group/pseudotime; methylation rows are raw TSS beta-value z-scores.
+1B,Figure_1B_RNA_TSS_methylation_coupling_matrix,p_cor_matrix_v3,Main figure,Raw RNA versus raw TSS methylation Spearman rho; negative diagonal correlations support promoter/TSS-linked repression.
+1C,Figure_1C_OS_evidence_projected_on_EOBC_group_markers,p_os_state_v3,Main figure,OS-linked group-defining markers are projected onto the same state-resolved dominance coordinates.
+1D,Figure_1D_DepMap_evidence_projected_on_EOBC_group_markers,p_depmap_state_v3,Main figure,DepMap sensitivity/resistance evidence is projected onto group-defining markers with best drug labels.
+1E,Figure_1E_Immune_evidence_projected_on_EOBC_group_markers,p_immune_state_v3,Main figure,TIL/TMB immune evidence is projected onto group-defining markers.
+1F,Figure_1F_OS_evidence_on_EOBC_family_trajectories,p_traj_os_v2,Main or supporting figure,Family-level EOBC trajectories annotated with counts/direction of OS-linked markers.
+1G,Figure_1G_DepMap_evidence_on_EOBC_family_trajectories,p_traj_depmap_v2,Main or supporting figure,Family-level EOBC trajectories annotated with drug-response-linked marker counts.
+1H,Figure_1H_Immune_evidence_on_EOBC_family_trajectories,p_traj_immune_v2,Main or supporting figure,Family-level EOBC trajectories annotated with immune-linked marker counts.
+S1A,Figure_S1A_EOBC_group_mean_activity_coupling_heatmap,fig_group_activity_heat_v3,Supplement,Compact group-level version of the activity/coupling heatmap.

@@ -1,0 +1,51 @@
+# Local plots and scratch files
+Rplots.pdf
+test_flow.png
+*.tmp
+*.bak
+
+# Runtime outputs
+outputs/
+figures/
+plots/
+tables/
+final_analysis/
+final_fig/
+
+# Raw or controlled-access data
+data/
+raw/
+input/
+inputs/
+00_inputs_detected/
+*.xlsx
+*.xls
+*.h5
+*.hdf5
+*.rds
+*.RData
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# R
+.Rhistory
+.RData
+.Rproj.user/
+renv/library/
+renv/staging/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Secrets and local path configs
+.env
+config/paths.local.yml
+

@@ -1,0 +1,7 @@
+lifelines
+matplotlib
+numpy
+pandas
+scipy
+seaborn
+
