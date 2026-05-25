@@ -187,8 +187,8 @@ blend_route_color <- function(group, family, evidence, biomarker_set, rf_dom) {
           pick_col(biomarker_set_cols, b),
           pick_col(rf_dom_cols, r)
         ),
-        c(0.20, 0.30, 0.28, 0.12, 0.10)
-      ), sat = 1.28, val = 1.04)
+        c(0.64, 0.15, 0.12, 0.05, 0.04)
+      ), sat = 1.18, val = 1.03)
     },
     as.character(group),
     as.character(family),
@@ -207,26 +207,26 @@ route_stage_colors <- function(group, family, evidence, biomarker_set, rf_dom, m
       evidence_col <- evidence_color_for_node(e)
       biomarker_col <- boost_col(mix_cols(
         c(pick_col(meth_rna_cols, m), pick_col(rf_dom_cols, r), pick_col(biomarker_set_cols, b)),
-        c(0.44, 0.34, 0.22)
-      ), sat = 1.12, val = 1.02)
+        c(0.48, 0.32, 0.20)
+      ), sat = 1.06, val = 1.02)
 
       c(
         stage1_color = boost_col(mix_cols(
-          c(group_col, family_col, biomarker_col),
-          c(0.88, 0.08, 0.04)
-        ), sat = 1.08, val = 1.02),
+          c(group_col, family_col, biomarker_col, evidence_col),
+          c(0.92, 0.05, 0.02, 0.01)
+        ), sat = 1.10, val = 1.02),
         stage2_color = boost_col(mix_cols(
           c(group_col, family_col, biomarker_col, evidence_col),
-          c(0.44, 0.46, 0.08, 0.02)
+          c(0.74, 0.19, 0.05, 0.02)
         ), sat = 1.10, val = 1.02),
         stage3_color = boost_col(mix_cols(
           c(group_col, family_col, biomarker_col, evidence_col),
-          c(0.18, 0.28, 0.42, 0.12)
-        ), sat = 1.13, val = 1.02),
+          c(0.66, 0.09, 0.19, 0.06)
+        ), sat = 1.10, val = 1.02),
         stage4_color = boost_col(mix_cols(
           c(group_col, family_col, biomarker_col, evidence_col),
-          c(0.08, 0.16, 0.26, 0.50)
-        ), sat = 1.15, val = 1.02)
+          c(0.62, 0.06, 0.08, 0.24)
+        ), sat = 1.12, val = 1.02)
       )
     },
     as.character(group),
@@ -884,8 +884,8 @@ plot_sankey <- function(df, title, subtitle, width, height, outfile_stub, label_
     function(b, f, g, r, m) {
       boost_col(mix_cols(
         c(pick_col(meth_rna_cols, m), pick_col(rf_dom_cols, r), pick_col(biomarker_set_cols, b), pick_col(family_cols, f), pick_col(group_node_cols, g)),
-        c(0.38, 0.24, 0.18, 0.13, 0.07)
-      ), sat = 1.24, val = 1.03)
+        c(0.18, 0.14, 0.08, 0.10, 0.50)
+      ), sat = 1.14, val = 1.02)
     },
     as.character(biomarker_map$biomarker_set),
     as.character(biomarker_map$Family6),
@@ -896,7 +896,24 @@ plot_sankey <- function(df, title, subtitle, width, height, outfile_stub, label_
   )
 
   evidence_names <- unique(as.character(df_plot$`Functional evidence`))
-  stratum_cols[evidence_names] <- evidence_color_for_node(evidence_names)
+  evidence_map <- df_plot %>%
+    group_by(`Functional evidence`) %>%
+    summarise(
+      group_mix = mix_cols(vapply(EOBC_group, function(g) pick_col(group_node_cols, g), character(1)), route_weight),
+      evidence_tone = evidence_color_for_node(first(as.character(`Functional evidence`))),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      evidence_fill = mapply(
+        function(g_col, e_col) {
+          boost_col(mix_cols(c(g_col, e_col), c(0.72, 0.28)), sat = 1.10, val = 1.02)
+        },
+        group_mix,
+        evidence_tone,
+        USE.NAMES = FALSE
+      )
+    )
+  stratum_cols[as.character(evidence_map$`Functional evidence`)] <- evidence_map$evidence_fill
 
   df_lodes <- bind_rows(lapply(seq_along(axis_names), function(i) {
     df_plot %>%
@@ -951,17 +968,17 @@ plot_sankey <- function(df, title, subtitle, width, height, outfile_stub, label_
     geom_flow(
       aes(fill = lode_fill),
       aes.flow = "forward",
-      alpha = 0.52,
+      alpha = 0.66,
       width = 0.102,
       knot.pos = 0.47,
-      color = scales::alpha("white", 0.30),
+      color = scales::alpha("white", 0.36),
       linewidth = 0.09,
       show.legend = FALSE
     ) +
     geom_flow(
       aes(fill = lode_fill),
       aes.flow = "backward",
-      alpha = 0.48,
+      alpha = 0.38,
       width = 0.092,
       knot.pos = 0.53,
       color = NA,
@@ -1011,8 +1028,8 @@ plot_sankey <- function(df, title, subtitle, width, height, outfile_stub, label_
       y = "Evidence-flow weight",
       fill = "Biomarker evidence set",
       caption = paste(
-        "Ribbon hues are route-specific blends that transition across columns: EOBC-state at entry, EOBC+program in the middle, biomarker Meth-RNA/RF layer near terminal genes, and evidence-domain at the endpoint.",
-        "Thin inner strands retain terminal evidence-set class. Labels show Meth-RNA class plus RF methylation/RNA scores.",
+        "Ribbon hues keep EOBC-state identity across the route, then receive subtle biological-program, biomarker Meth-RNA/RF, and evidence-domain tints.",
+        "Terminal biomarker and evidence-domain boxes use group-weighted blends so group-to-evidence routes remain visually traceable. Labels show Meth-RNA class plus RF methylation/RNA scores.",
         "OS routes require KM log-rank p < 0.05. DepMap uses curated drug classes only. TMB-log1p zero outliers are excluded only for TMB correlations.",
         sep = "\n"
       )
