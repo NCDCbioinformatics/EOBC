@@ -164,6 +164,24 @@ immune_score_status <- function(til_rho, til_fdr, tmb_rho, tmb_fdr, fdr_cutoff =
   )
 }
 
+immune_direction_consistent <- function(til_rho, tmb_rho, digits = 2) {
+  til_dir <- case_when(
+    is.finite(til_rho) & round(til_rho, digits) > 0 ~ 1L,
+    is.finite(til_rho) & round(til_rho, digits) < 0 ~ -1L,
+    TRUE ~ 0L
+  )
+  tmb_dir <- case_when(
+    is.finite(tmb_rho) & round(tmb_rho, digits) > 0 ~ 1L,
+    is.finite(tmb_rho) & round(tmb_rho, digits) < 0 ~ -1L,
+    TRUE ~ 0L
+  )
+  til_dir != 0L & tmb_dir != 0L & til_dir == tmb_dir
+}
+
+depmap_class_is_curated <- function(x) {
+  !str_detect(coalesce(x, ""), regex("Other|Experimental|exploratory", ignore_case = TRUE))
+}
+
 read_domain <- function(file) {
   read_csv(file.path(domain_dir, file), show_col_types = FALSE) %>%
     mutate(
@@ -268,7 +286,8 @@ domain_marker <- read_domain("group_defined_marker_domain_input_tss_low_activity
     drug_sig = drug_sig %in% TRUE & !str_detect(coalesce(drug_class_clean, ""), regex("Other|exploratory", ignore_case = TRUE)),
     til_sig = is.finite(til_activity_rho) & is.finite(p_TIL_raw) & p_TIL_raw < 0.05,
     tmb_sig = is.finite(tmb_activity_rho) & is.finite(p_TMB_raw) & p_TMB_raw < 0.05,
-    immune_sig = immune_sig %in% TRUE & (til_sig | tmb_sig),
+    immune_direction_agree = immune_direction_consistent(til_activity_rho, tmb_activity_rho),
+    immune_sig = (til_sig | tmb_sig) & immune_direction_agree,
     os_status = case_when(os_sig & os_activity_direction == "Protective" ~ "Protective",
                           os_sig & os_activity_direction == "Adverse" ~ "Adverse",
                           TRUE ~ "Not significant"),
@@ -289,26 +308,106 @@ os_endpoint <- read_domain("OS_group_defined_marker_endpoint_results.csv") %>%
     os_evidence = selected %in% TRUE | p < 0.10
   )
 
+depmap_dose_pair_omics <- read_csv(
+  file.path(biomarker_root, "15_final_manuscript_OS_TILTMB_drug_sankey", "tables", "gene_drug_topk_hits.csv"),
+  show_col_types = FALSE
+) %>%
+  mutate(
+    modality = recode(panel_layer, Transcriptome = "RNA", Methylation = "METH", .default = NA_character_),
+    p_primary = as.numeric(p_primary),
+    q_primary = as.numeric(q_primary),
+    rank_in_gene = as.numeric(rank_in_gene)
+  ) %>%
+  filter(!is.na(modality)) %>%
+  group_by(gene, drug_clean) %>%
+  arrange(rank_in_gene, p_primary, q_primary, .by_group = TRUE) %>%
+  slice_head(n = 1) %>%
+  ungroup() %>%
+  select(gene, drug_clean, modality)
+
+depmap_dose_pair_stats <- read_csv(
+  file.path(biomarker_root, "14_final_manuscript_validation_suite_v8_polished_figures", "tables", "top_gene_dose_response_stats_polished.csv"),
+  show_col_types = FALSE
+) %>%
+  mutate(
+    primary_p = as.numeric(primary_p),
+    q_primary = as.numeric(q_primary),
+    auc_p = as.numeric(auc_p),
+    ic50_p = as.numeric(ic50_p),
+    auc_delta = as.numeric(auc_delta),
+    ic50_delta = as.numeric(ic50_delta),
+    rho_auc = as.numeric(rho_auc),
+    rho_ic50 = as.numeric(rho_ic50),
+    n_high = as.numeric(n_high),
+    n_low = as.numeric(n_low),
+    depmap_curve_metric = case_when(
+      is.finite(primary_p) & is.finite(auc_p) & abs(primary_p - auc_p) < 1e-12 ~ "AUC",
+      is.finite(primary_p) & is.finite(ic50_p) & abs(primary_p - ic50_p) < 1e-12 ~ "IC50",
+      TRUE ~ "AUC/IC50"
+    ),
+    depmap_curve_direction_score = case_when(
+      depmap_curve_metric == "AUC" ~ auc_delta,
+      depmap_curve_metric == "IC50" ~ ic50_delta,
+      is.finite(auc_delta) ~ auc_delta,
+      is.finite(ic50_delta) ~ ic50_delta,
+      is.finite(rho_auc) ~ rho_auc,
+      is.finite(rho_ic50) ~ rho_ic50,
+      TRUE ~ NA_real_
+    ),
+    depmap_curve_n = case_when(
+      is.finite(n_high) & is.finite(n_low) ~ n_high + n_low,
+      is.finite(n_high) ~ n_high,
+      is.finite(n_low) ~ n_low,
+      TRUE ~ NA_real_
+    ),
+    depmap_curve_direction = case_when(
+      direction == "more_sensitive_when_high" ~ "Sensitive",
+      direction == "more_resistant_when_high" ~ "Resistant",
+      depmap_curve_direction_score < 0 ~ "Sensitive",
+      depmap_curve_direction_score > 0 ~ "Resistant",
+      TRUE ~ "Not significant"
+    )
+  ) %>%
+  left_join(depmap_dose_pair_omics, by = c("gene", "drug_clean")) %>%
+  filter(
+    !is.na(modality),
+    is.finite(primary_p),
+    is.finite(depmap_curve_direction_score)
+  ) %>%
+  group_by(gene, modality) %>%
+  arrange(primary_p, q_primary, desc(abs(depmap_curve_direction_score)), .by_group = TRUE) %>%
+  slice_head(n = 1) %>%
+  ungroup() %>%
+  transmute(
+    gene,
+    modality,
+    depmap_curve_drug_clean = drug_clean,
+    depmap_curve_class = drug_target_class,
+    depmap_curve_direction_score,
+    depmap_curve_p = primary_p,
+    depmap_curve_q = q_primary,
+    depmap_curve_metric,
+    depmap_curve_n,
+    depmap_curve_direction
+  )
+write_csv(depmap_dose_pair_stats, file.path(table_dir, "depmap_dose_response_primary_pvalue_pairs_used.csv"))
+
 depmap_best <- read_domain("DepMap_group_defined_marker_best_drug_results.csv") %>%
   left_join(
-    read_csv(
-      file.path(validation_dir, "depmap_all_candidate_best_hits_by_omics.csv"),
-      show_col_types = FALSE
-    ) %>%
-      transmute(
-        gene,
-        modality = omics,
-        depmap_p = as.numeric(p),
-        depmap_metric = metric,
-        depmap_n = as.numeric(n),
-        depmap_raw_rho = as.numeric(rho)
-      ) %>%
-      distinct(gene, modality, .keep_all = TRUE),
+    depmap_dose_pair_stats,
     by = c("gene", "modality")
   ) %>%
   mutate(
-    drug_sig = depmap_p < 0.05 & feature_available %in% TRUE &
-      !str_detect(coalesce(drug_class_clean, ""), regex("Other|exploratory", ignore_case = TRUE)),
+    depmap_p = depmap_curve_p,
+    depmap_q = depmap_curve_q,
+    depmap_metric = depmap_curve_metric,
+    depmap_n = depmap_curve_n,
+    depmap_raw_rho = depmap_curve_direction_score,
+    drug_clean = coalesce(depmap_curve_drug_clean, drug_clean),
+    drug_class_clean = coalesce(depmap_curve_class, drug_class_clean),
+    depmap_activity_rho = coalesce(depmap_curve_direction_score, depmap_activity_rho),
+    depmap_activity_direction = coalesce(depmap_curve_direction, depmap_activity_direction),
+    drug_sig = depmap_p < 0.05 & feature_available %in% TRUE,
     drug_status = case_when(drug_sig & depmap_activity_direction == "Sensitive" ~ "Sensitive",
                             drug_sig & depmap_activity_direction == "Resistant" ~ "Resistant",
                             TRUE ~ "Not significant"),
@@ -322,7 +421,8 @@ immune_best <- read_domain("Immune_group_defined_marker_til_tmb_results.csv") %>
     immune_best_p = pmin(coalesce(p_TIL_raw, 1), coalesce(p_TMB_raw, 1)),
     til_sig = is.finite(til_activity_rho) & is.finite(p_TIL_raw) & p_TIL_raw < 0.05,
     tmb_sig = is.finite(tmb_activity_rho) & is.finite(p_TMB_raw) & p_TMB_raw < 0.05,
-    immune_sig = til_sig | tmb_sig,
+    immune_direction_agree = immune_direction_consistent(til_activity_rho, tmb_activity_rho),
+    immune_sig = (til_sig | tmb_sig) & immune_direction_agree,
     immune_status = if_else(
       immune_sig,
       immune_score_status(til_activity_rho, p_TIL_raw, tmb_activity_rho, p_TMB_raw, fdr_cutoff = 0.05),
@@ -368,18 +468,30 @@ activity_dominance <- activity_group_means %>%
     domain_marker %>% select(
       gene, modality, os_sig, drug_sig, immune_sig, os_status, drug_status, immune_status,
       os_best_endpoint, os_activity_direction, drug_clean, drug_class_clean,
-      depmap_activity_direction, immune_activity_quadrant,
+      depmap_activity_direction, depmap_activity_rho, feature_available, immune_activity_quadrant,
       til_activity_rho, tmb_activity_rho, til_activity_fdr, tmb_activity_fdr,
       p_TIL_raw, p_TMB_raw, til_sig, tmb_sig
     ),
     by = c("gene", "modality")
   ) %>%
+  left_join(
+    depmap_dose_pair_stats,
+    by = c("gene", "modality")
+  ) %>%
   mutate(
     os_sig = os_sig %in% TRUE,
-    drug_sig = drug_sig %in% TRUE,
+    drug_clean = coalesce(depmap_curve_drug_clean, drug_clean),
+    drug_class_clean = coalesce(depmap_curve_class, drug_class_clean),
+    depmap_activity_direction = coalesce(depmap_curve_direction, depmap_activity_direction),
+    depmap_activity_rho = coalesce(depmap_curve_direction_score, depmap_activity_rho),
+    drug_sig = is.finite(depmap_curve_p) & depmap_curve_p < 0.05,
     immune_sig = immune_sig %in% TRUE,
     os_status = replace_na(os_status, "Not significant"),
-    drug_status = replace_na(drug_status, "Not significant"),
+    drug_status = case_when(
+      drug_sig & depmap_activity_direction == "Sensitive" ~ "Sensitive",
+      drug_sig & depmap_activity_direction == "Resistant" ~ "Resistant",
+      TRUE ~ "Not significant"
+    ),
     immune_status = replace_na(immune_status, "Not significant"),
     domain_count = os_sig + drug_sig + immune_sig
   )
@@ -449,7 +561,7 @@ cor_strip <- row_order %>%
 
 domain_strip <- row_order %>%
   select(feature_id, gene, modality) %>%
-  left_join(domain_marker %>% select(gene, modality, os_sig, drug_sig, immune_sig), by = c("gene", "modality")) %>%
+  left_join(activity_dominance %>% select(gene, modality, os_sig, drug_sig, immune_sig), by = c("gene", "modality")) %>%
   mutate(across(c(os_sig, drug_sig, immune_sig), ~ .x %in% TRUE)) %>%
   pivot_longer(c(os_sig, drug_sig, immune_sig), names_to = "domain", values_to = "present") %>%
   mutate(
@@ -1033,19 +1145,18 @@ os_state_domain_v3 <- os_endpoint %>%
     domain_metric = "Best OS endpoint Cox beta"
   )
 
-depmap_state_domain_v3 <- depmap_best %>%
-  left_join(
-    domain_plot_context %>% select(gene, modality, dominant_mean_z),
-    by = c("gene", "modality")
-  ) %>%
+depmap_state_domain_v3 <- activity_dominance %>%
   mutate(
     drug_sig = drug_sig %in% TRUE,
-    domain_x = depmap_activity_rho,
-    domain_y = safe_neglog(depmap_p, 12),
-    domain_fdr = depmap_fdr,
-    domain_p = depmap_p,
-    domain_effect_abs = abs(depmap_activity_rho),
-    domain_metric = "Best DepMap drug-response Spearman correlation"
+    depmap_p = depmap_curve_p,
+    depmap_q = depmap_curve_q,
+    depmap_metric = depmap_curve_metric,
+    domain_x = depmap_curve_direction_score,
+    domain_y = safe_neglog(depmap_curve_p, 12),
+    domain_fdr = depmap_curve_q,
+    domain_p = depmap_curve_p,
+    domain_effect_abs = abs(depmap_curve_direction_score),
+    domain_metric = paste0("DepMap ", depmap_curve_metric, " dose-response curve comparison")
   )
 
 immune_state_domain_v3 <- immune_best %>%
@@ -1067,7 +1178,7 @@ immune_state_domain_v3 <- immune_best %>%
     domain_p = immune_best_p,
     domain_effect_abs = abs(domain_x),
     immune_sig = immune_sig %in% TRUE,
-    domain_metric = "Best TIL/TMB Spearman association"
+    domain_metric = "TIL or TMB Spearman association"
   )
 
 write_csv(os_state_domain_v3, file.path(table_dir, "Figure_02A_OS_state_domain_coordinates_R_v3.csv"))
@@ -1110,7 +1221,7 @@ make_group_activity_panel <- function(layer_name, show_x = FALSE, show_legend = 
   domain_strip2 <- layer_rows %>%
     select(y, gene, modality) %>%
     left_join(
-      domain_marker %>% select(gene, modality, os_sig, drug_sig, immune_sig),
+      activity_dominance %>% select(gene, modality, os_sig, drug_sig, immune_sig),
       by = c("gene", "modality")
     ) %>%
     mutate(across(c(os_sig, drug_sig, immune_sig), ~ .x %in% TRUE)) %>%
@@ -1261,11 +1372,11 @@ domain_sig_label <- function(df, domain = c("OS", "DepMap", "Immune")) {
       )
   } else {
     if ("domain_size_fdr" %in% names(df)) {
-      df <- df %>% mutate(immune_plot_sig = is.finite(domain_size_fdr) & domain_size_fdr < 0.05)
+      df <- df %>% mutate(immune_plot_sig = is.finite(domain_size_fdr) & domain_size_fdr < 0.05 & immune_sig %in% TRUE)
     } else if ("domain_p" %in% names(df)) {
-      df <- df %>% mutate(immune_plot_sig = is.finite(domain_p) & domain_p < 0.05)
+      df <- df %>% mutate(immune_plot_sig = is.finite(domain_p) & domain_p < 0.05 & immune_sig %in% TRUE)
     } else if ("immune_best_p" %in% names(df)) {
-      df <- df %>% mutate(immune_plot_sig = is.finite(immune_best_p) & immune_best_p < 0.05)
+      df <- df %>% mutate(immune_plot_sig = is.finite(immune_best_p) & immune_best_p < 0.05 & immune_sig %in% TRUE)
     } else {
       df <- df %>% mutate(immune_plot_sig = immune_sig %in% TRUE)
     }
@@ -1308,8 +1419,8 @@ domain_significance_table <- function(domain = c("OS", "DepMap", "Immune")) {
       ungroup() %>%
       transmute(gene, modality, domain_size_fdr = p)
   } else if (domain == "DepMap") {
-    depmap_best %>%
-      transmute(gene, modality, domain_size_fdr = as.numeric(depmap_p))
+    depmap_dose_pair_stats %>%
+      transmute(gene, modality, domain_size_fdr = as.numeric(depmap_curve_p))
   } else {
     immune_best %>%
       transmute(
@@ -1343,7 +1454,7 @@ add_domain_significance_size <- function(df, domain = c("OS", "DepMap", "Immune"
       )
   } else if (domain == "Immune") {
     out <- out %>%
-      mutate(domain_nominal_sig = is.finite(domain_size_fdr) & domain_size_fdr < 0.05)
+      mutate(domain_nominal_sig = is.finite(domain_size_fdr) & domain_size_fdr < 0.05 & .data[[sig_col]] %in% TRUE)
   } else {
     out <- out %>%
       mutate(domain_nominal_sig = .data[[sig_col]] %in% TRUE)
@@ -1372,8 +1483,8 @@ state_domain_scatter <- function(df, domain, title, subtitle, status_values, sta
   size_name <- switch(
     domain,
     OS = "-log10(Cox\np-value)",
-    DepMap = "-log10(DepMap drug-response\nSpearman p-value)",
-    Immune = "-log10(TIL/TMB\nSpearman p-value)"
+    DepMap = "-log10(DepMap AUC/IC50\ndose-response curve p-value)",
+    Immune = "-log10(best TIL/TMB\nSpearman p-value)"
   )
 
   p <- ggplot(plot_df, aes(activity_contrast_z, neg_log10_fdr)) +
@@ -1450,7 +1561,7 @@ p_depmap_state_v2 <- state_domain_scatter(
   activity_dominance,
   "DepMap",
   "D. DepMap-linked biomarkers within EOBC group-defining programs",
-  "The same group-marker landscape is reused; point size encodes DepMap drug-response Spearman correlation p-value and labels show the best associated drug.",
+  "The same group-marker landscape is reused; point size encodes the AUC/IC50 dose-response curve p-value and labels show the associated drug.",
   drug_cols,
   "DepMap evidence",
   "Figure_03A_DepMap_state_resolved_group_marker_evidence_R_v2"
@@ -1460,7 +1571,7 @@ p_immune_state_v2 <- state_domain_scatter(
   activity_dominance,
   "Immune",
   "E. Immune-linked biomarkers within EOBC group-defining programs",
-  "Significant TIL/TMB-associated markers are projected onto the EOBC dominance landscape; point size encodes the best TIL/TMB Spearman correlation p-value.",
+  "Markers significant for either TIL or TMB are highlighted only when TIL and TMB rho directions agree; zero-direction rho values are excluded and TMB correlations exclude the six zero-TMB outlier samples.",
   immune_cols,
   "Immune evidence",
   "Figure_04A_Immune_state_resolved_group_marker_evidence_R_v2"
@@ -1641,11 +1752,11 @@ p_os_biomarker_summary_v1 <- make_domain_biomarker_summary(
 p_depmap_biomarker_summary_v1 <- make_domain_biomarker_summary(
   depmap_biomarker_summary,
   "DepMap significant biomarker summary",
-  "EOBC group panels are removed; rows list biomarkers with DepMap drug-response Spearman correlation p < 0.05 and their best associated compound.",
-  "Signed DepMap association with drug response",
+  "EOBC group panels are removed; rows list biomarkers with AUC/IC50 dose-response curve p < 0.05 and their associated compound.",
+  "Signed DepMap AUC/IC50 dose-response delta",
   drug_cols[c("Sensitive", "Resistant")],
   "DepMap evidence",
-  "-log10(DepMap drug-response\nSpearman p-value)",
+  "-log10(DepMap AUC/IC50\ndose-response curve p-value)",
   "Figure_S2B_DepMap_significant_biomarker_summary_no_group_R_v1",
   width = 12.2,
   height = 7.4
@@ -1654,11 +1765,11 @@ p_depmap_biomarker_summary_v1 <- make_domain_biomarker_summary(
 p_immune_biomarker_summary_v1 <- make_domain_biomarker_summary(
   immune_biomarker_summary,
   "Immune significant biomarker summary",
-  "EOBC group panels are removed; immune status is simplified to posi/nega using TIL/TMB Spearman correlation p < 0.05.",
+  "EOBC group panels are removed; rows require either TIL or TMB Spearman p < 0.05 with concordant non-zero TIL/TMB rho directions after excluding six zero-TMB outlier samples from the TMB test.",
   "Signed strongest TIL/TMB Spearman rho",
   immune_cols[c("posi", "nega")],
   "Immune evidence",
-  "-log10(TIL/TMB\nSpearman p-value)",
+  "-log10(best TIL/TMB\nSpearman p-value)",
   "Figure_S2C_Immune_significant_biomarker_summary_no_group_R_v1",
   width = 12.2,
   height = 8.0
@@ -1838,13 +1949,13 @@ p_depmap_state_v3 <- state_domain_scatter_v3(
   depmap_state_domain_v3,
   "DepMap",
   "D. DepMap drug-response evidence within EOBC group-defining programs",
-  "Coordinates show the signed DepMap drug-response Spearman rho and correlation p-value; labels retain the best associated drug.",
+  "Coordinates show the signed AUC/IC50 dose-response delta and curve-comparison p-value; labels retain the associated drug.",
   drug_cols,
   "DepMap evidence",
   "Figure_03A_DepMap_state_resolved_group_marker_evidence_R_v3",
-  "Signed DepMap association with drug response",
-  "-log10(DepMap drug-response Spearman p-value), capped at 12",
-  "|DepMap rho|",
+  "Signed DepMap AUC/IC50 dose-response delta",
+  "-log10(DepMap AUC/IC50 dose-response curve p-value), capped at 12",
+  "|AUC/IC50 delta|",
   c(0.05)
 )
 
@@ -1852,13 +1963,13 @@ p_immune_state_v3 <- state_domain_scatter_v3(
   immune_state_domain_v3,
   "Immune",
   "E. Immune evidence within EOBC group-defining biomarker programs",
-  "Coordinates show the strongest TIL/TMB Spearman rho and correlation p-value; labels report both signed rho values.",
+  "Coordinates show the strongest TIL/TMB Spearman rho and best p-value; only concordant non-zero TIL/TMB directions are retained and TMB correlations exclude six zero-TMB outlier samples.",
   immune_cols,
   "Immune evidence",
   "Figure_04A_Immune_state_resolved_group_marker_evidence_R_v3",
   "Signed strongest TIL/TMB Spearman rho",
-  "-log10(TIL/TMB Spearman p-value), capped at 12",
-  "|Best rho|",
+  "-log10(best TIL/TMB Spearman p-value), capped at 12",
+  "|Strongest rho|",
   c(0.10, 0.05)
 )
 
@@ -1869,8 +1980,8 @@ v3_readme <- c(
   "Figure_01A_EOBC_group_activity_coupling_heatmap_R_v3: group-level RNA expression and raw TSS methylation heatmap with RNA-TSS correlation and OS/DepMap/immune evidence strips.",
   "Figure_01B_RNA_TSS_methylation_correlation_matrix_R_v3: matched RNA-vs-TSS methylation correlation matrix.",
   "Figure_02A_OS_state_resolved_group_marker_evidence_R_v3: OS evidence plotted by Cox beta and Cox regression p-value within EOBC state marker programs.",
-  "Figure_03A_DepMap_state_resolved_group_marker_evidence_R_v3: DepMap evidence plotted by signed drug-response Spearman rho and correlation p-value within EOBC state marker programs.",
-  "Figure_04A_Immune_state_resolved_group_marker_evidence_R_v3: immune evidence plotted by strongest TIL/TMB Spearman rho and correlation p-value within EOBC state marker programs.",
+  "Figure_03A_DepMap_state_resolved_group_marker_evidence_R_v3: DepMap evidence plotted by signed AUC/IC50 dose-response delta and curve-comparison p-value within EOBC state marker programs.",
+  "Figure_04A_Immune_state_resolved_group_marker_evidence_R_v3: immune evidence requires either TIL or TMB Spearman p < 0.05 plus concordant non-zero TIL/TMB rho directions, with six zero-TMB outlier samples excluded from TMB correlations.",
   "",
   "Interpretation note: TSS methylation is shown as raw beta-value z-scores in group maps. Raw RNA-TSS correlations are retained in the correlation panels; negative rho is the biologically expected direction for promoter repression."
 )

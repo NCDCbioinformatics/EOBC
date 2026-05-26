@@ -252,6 +252,14 @@ first_nonempty <- function(x) {
   if (length(x) == 0) NA_character_ else x[[1]]
 }
 
+format_p_compact <- function(x) {
+  case_when(
+    !is.finite(x) ~ "p NA",
+    x < 0.001 ~ "p <0.001",
+    TRUE ~ paste0("p ", formatC(x, format = "f", digits = 3))
+  )
+}
+
 clean_label <- function(x) {
   x %>%
     str_replace_all("_", " ") %>%
@@ -913,13 +921,13 @@ write_csv(biomarker_summary, file.path(table_dir, "meth_group_pathway_evidence_b
 write_csv(depmap_routes, file.path(table_dir, "meth_group_pathway_evidence_biomarker_right_sankey_depmap_drugclass_routes.csv"))
 
 domain_coord_dir <- file.path(base_dir, "group_biomarker_contextual_domain_raw_meth_r_v1", "tables")
-os_domain_coords <- read_csv(file.path(domain_coord_dir, "Figure_02A_OS_state_domain_coordinates_R_v3.csv"), show_col_types = FALSE)
-depmap_domain_coords <- read_csv(file.path(domain_coord_dir, "Figure_03A_DepMap_state_domain_coordinates_R_v3.csv"), show_col_types = FALSE)
-immune_domain_coords <- read_csv(file.path(domain_coord_dir, "Figure_04A_Immune_state_domain_coordinates_R_v3.csv"), show_col_types = FALSE)
+os_story_summary <- read_csv(file.path(domain_coord_dir, "OS_significant_biomarker_summary_no_group.csv"), show_col_types = FALSE)
+depmap_story_summary <- read_csv(file.path(domain_coord_dir, "DepMap_significant_biomarker_summary_no_group.csv"), show_col_types = FALSE)
+immune_story_summary <- read_csv(file.path(domain_coord_dir, "Immune_significant_biomarker_summary_no_group.csv"), show_col_types = FALSE)
 
 story_source_routes <- bind_rows(
-  os_domain_coords %>%
-    filter(os_sig %in% TRUE) %>%
+  os_story_summary %>%
+    filter(domain_status %in% c("Protective", "Adverse")) %>%
     mutate(
       Family6_source = recode(as.character(Family6), "Hormone signaling" = "Developmental signaling"),
       Family6_source = if_else(Family6_source %in% names(family_cols), Family6_source, "Immune")
@@ -931,13 +939,13 @@ story_source_routes <- bind_rows(
       Family6_source,
       pathway_program_source = pathway_subclass(Family6_source, gene_clean, target_label),
       route_type = "OS",
-      evidence_summary = paste0("OS | ", os_status),
+      evidence_summary = paste0("OS | ", domain_status),
       route_weight = pmin(0.86, 0.32 + 0.065 * pmin(domain_y, 5)),
-      evidence_details = paste(os_best_endpoint, os_status),
+      evidence_details = paste(os_best_endpoint, domain_status, format_p_compact(domain_p)),
       max_activity_contrast_z = activity_contrast_z
     ),
-  depmap_domain_coords %>%
-    filter(drug_sig %in% TRUE) %>%
+  depmap_story_summary %>%
+    filter(domain_status %in% c("Sensitive", "Resistant")) %>%
     mutate(
       Family6_source = recode(as.character(Family6), "Hormone signaling" = "Developmental signaling"),
       Family6_source = if_else(Family6_source %in% names(family_cols), Family6_source, "Immune")
@@ -949,13 +957,13 @@ story_source_routes <- bind_rows(
       Family6_source,
       pathway_program_source = pathway_subclass(Family6_source, gene_clean, target_label),
       route_type = "DepMap",
-      evidence_summary = paste0("DepMap | ", drug_status),
+      evidence_summary = paste0("DepMap | ", domain_status),
       route_weight = pmin(0.82, 0.30 + 0.060 * pmin(domain_y, 5)),
-      evidence_details = paste(drug_clean, drug_status),
+      evidence_details = paste(drug_clean, domain_status, format_p_compact(domain_p)),
       max_activity_contrast_z = activity_contrast_z
     ),
-  immune_domain_coords %>%
-    filter(immune_sig %in% TRUE) %>%
+  immune_story_summary %>%
+    filter(domain_status %in% c("posi", "nega")) %>%
     mutate(
       Family6_source = recode(as.character(Family6), "Hormone signaling" = "Developmental signaling"),
       Family6_source = if_else(Family6_source %in% names(family_cols), Family6_source, "Immune")
@@ -968,12 +976,16 @@ story_source_routes <- bind_rows(
       pathway_program_source = pathway_subclass(Family6_source, gene_clean, target_label),
       route_type = "Immune",
       evidence_summary = case_when(
-        str_detect(immune_status, regex("posi|positive", ignore_case = TRUE)) ~ "Immune | TIL/TMB positive",
-        str_detect(immune_status, regex("nega|negative", ignore_case = TRUE)) ~ "Immune | TIL/TMB negative",
+        domain_status == "posi" ~ "Immune | TIL/TMB positive",
+        domain_status == "nega" ~ "Immune | TIL/TMB negative",
         TRUE ~ "Immune | TIL/TMB weak"
       ),
       route_weight = pmin(0.82, 0.30 + 0.060 * pmin(domain_y, 5)),
-      evidence_details = paste0("TIL rho ", sprintf("%.2f", til_activity_rho), " / TMB rho ", sprintf("%.2f", tmb_activity_rho)),
+      evidence_details = paste0(
+        "TIL rho ", sprintf("%.2f", til_activity_rho),
+        " / TMB rho ", sprintf("%.2f", tmb_activity_rho),
+        " / ", format_p_compact(domain_p)
+      ),
       max_activity_contrast_z = activity_contrast_z
     )
 ) %>%
@@ -1027,9 +1039,18 @@ routes_story <- story_source_routes %>%
     rf_RNA = coalesce(rf_RNA, fallback_rf_RNA, 0),
     rf_dom = coalesce(rf_dom, fallback_rf_dom, "RF n/a"),
     rf_layer_label = coalesce(rf_layer_label, fallback_rf_layer_label, "RF n/a"),
-    biomarker_node = coalesce(
-      biomarker_node,
-      paste0(gene_clean, "\n", feature_layer_label, "\n", meth_rna_class, "\n", rf_layer_label)
+    source_group_label = paste0(source_layer, " ", unname(group_short[EOBC_group])),
+    story_feature_label = if_else(
+      str_detect(feature_layer_label, fixed(source_group_label)),
+      feature_layer_label,
+      paste0(source_group_label, " evidence")
+    ),
+    biomarker_node = paste0(
+      gene_clean,
+      "\n", story_feature_label,
+      "\n", feature_layer_label,
+      "\n", meth_rna_class,
+      "\n", rf_layer_label
     )
   ) %>%
   group_by(
@@ -1100,7 +1121,7 @@ plot_sankey <- function(df, title, subtitle, width, height, outfile_stub, label_
       `Convergent biomarker` = pretty_biomarker_label(biomarker_node)
     )
 
-  state_levels <- unname(group_display[group_order])
+  state_levels <- rev(unname(group_display[group_order]))
   program_levels <- df_plot %>%
     distinct(`Biological program`, Family6) %>%
     arrange(Family6, `Biological program`) %>%
@@ -1531,7 +1552,7 @@ plot_story_sankey <- function(df, title, subtitle, width, height, outfile_stub, 
     ) +
     scale_x_discrete(
       limits = axis_names,
-      labels = c("EOBC state\n(METH/RNA markers)", "Group-defining\nbiomarker", "Functional\nevidence"),
+      labels = c("EOBC state\n(METH/RNA markers)", "Evidence-linked\nbiomarker", "Functional\nevidence"),
       expand = c(0.06, 0.028)
     ) +
     scale_fill_manual(values = fill_cols, breaks = names(biomarker_set_cols), drop = FALSE, na.value = "#E5E7EB") +
@@ -1542,9 +1563,9 @@ plot_story_sankey <- function(df, title, subtitle, width, height, outfile_stub, 
       y = NULL,
       fill = "Biomarker evidence set",
       caption = paste(
-        "Condensed Sankey of Figure 1C-E evidence: only OS, DepMap, and immune-linked marker routes are shown.",
+        "Condensed Sankey of Figure 1C-E and Figure S2A-C evidence: only final significant OS, DepMap, and immune-linked marker routes are shown.",
         "Ribbons start with EOBC-state color, pass through biomarker/family/Meth-RNA/RF tinting, and end with functional-evidence color.",
-        "Routes use the significant marker sets shown in Figure 1C-E. DepMap uses curated drug classes only. TMB-log1p zero outliers are excluded only for TMB correlations.",
+        "OS uses nominal Cox p < 0.05; DepMap uses AUC/IC50 dose-response curve p < 0.05; immune routes require concordant non-zero TIL/TMB directions after excluding six zero-TMB samples for TMB correlations.",
         sep = "\n"
       )
     ) +
@@ -1589,8 +1610,8 @@ copy_plot_alias <- function(source_stub, alias_stub) {
 
 plot_story_sankey(
   routes_story,
-  title = "EOBC group biomarker functional-evidence Sankey",
-  subtitle = "Condensed view of Figure 1C-E: METH/RNA group-defining biomarkers are linked only to OS, DepMap, and TIL/TMB evidence.",
+  title = "EOBC biomarker functional-evidence Sankey",
+  subtitle = "Condensed view of Figure 1C-E and Figure S2A-C: EOBC-state METH/RNA biomarkers are linked only to final significant OS, DepMap, and TIL/TMB evidence.",
   width = 20.5,
   height = 12.0,
   outfile_stub = "Figure_10C_EOBC_METH_group_pathway_evidence_biomarker_right_sankey_full_R_v13",
@@ -1599,8 +1620,8 @@ plot_story_sankey(
 
 plot_story_sankey(
   routes_story_priority,
-  title = "Priority EOBC group biomarker functional-evidence Sankey",
-  subtitle = "Focused marker view retaining OS-linked and multi-domain biomarkers from the condensed Figure 1C-E evidence set.",
+  title = "Priority EOBC biomarker functional-evidence Sankey",
+  subtitle = "Focused marker view retaining OS-linked and multi-domain biomarkers from the final Figure S2A-C evidence set.",
   width = 18.5,
   height = 9.5,
   outfile_stub = "Figure_10D_EOBC_METH_group_pathway_evidence_biomarker_right_sankey_priority_R_v13",
