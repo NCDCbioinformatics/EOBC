@@ -29,6 +29,7 @@ biomarker_root <- env_path("EOBC_BIOMARKER_ROOT")
 base_dir <- env_path("EOBC_FINAL_ANALYSIS_DIR", file.path(biomarker_root, "final_analysis"))
 landscape_dir <- file.path(base_dir, "group_biomarker_landscape_r_v1", "tables")
 domain_dir <- file.path(base_dir, "group_marker_domain_specific_r_v1", "tables")
+validation_dir <- file.path(base_dir, "full_layer_candidate_validation_r_v1", "tables")
 out_dir <- file.path(base_dir, "group_biomarker_contextual_domain_raw_meth_r_v1")
 plot_dir <- file.path(out_dir, "plots")
 table_dir <- file.path(out_dir, "tables")
@@ -51,7 +52,7 @@ family_cols <- c(
   "Glycolysis / TCA" = "#E6BC18",
   "Fatty acid" = "#F4A259",
   "Kinase signaling" = "#9B6AE8",
-  "Hormone signaling" = "#9AAABC"
+  "Developmental signaling" = "#B8A6C9"
 )
 
 domain_cols <- c(
@@ -73,13 +74,8 @@ drug_cols <- c(
 )
 
 immune_cols <- c(
-  "TIL rho positive" = "#17A2A4",
-  "TIL rho negative" = "#72A950",
-  "TMB rho positive" = "#7B61D1",
-  "TMB rho negative" = "#6F8FB7",
-  "TIL/TMB rho positive" = "#0E9F6E",
-  "TIL/TMB rho negative" = "#4B8B3B",
-  "Discordant TIL/TMB rho" = "#B9C4D1",
+  "posi" = "#17A2A4",
+  "nega" = "#72A950",
   "Not significant" = "#AEB8C5"
 )
 
@@ -128,6 +124,14 @@ safe_cor <- function(x, y) {
   tibble(rho = unname(ct$estimate), p = ct$p.value)
 }
 
+sample_rho_label <- function(rho, p) {
+  if_else(
+    is.finite(rho),
+    paste0(sprintf("%.2f", rho), if_else(is.finite(p) & p < 0.05, "*", "")),
+    ""
+  )
+}
+
 safe_kw <- function(value, group) {
   keep <- is.finite(value) & !is.na(group)
   value <- value[keep]
@@ -137,17 +141,25 @@ safe_kw <- function(value, group) {
   if (inherits(out, "try-error")) NA_real_ else out
 }
 
+harmonize_family <- function(x) {
+  recode(as.character(x), "Hormone signaling" = "Developmental signaling")
+}
+
 immune_score_status <- function(til_rho, til_fdr, tmb_rho, tmb_fdr, fdr_cutoff = 0.10) {
   til_sig <- is.finite(til_rho) & is.finite(til_fdr) & til_fdr < fdr_cutoff
   tmb_sig <- is.finite(tmb_rho) & is.finite(tmb_fdr) & tmb_fdr < fdr_cutoff
+  til_abs <- if_else(is.finite(til_rho), abs(til_rho), -Inf)
+  tmb_abs <- if_else(is.finite(tmb_rho), abs(tmb_rho), -Inf)
+  best_rho <- case_when(
+    til_sig & tmb_sig & til_abs >= tmb_abs ~ til_rho,
+    til_sig & tmb_sig ~ tmb_rho,
+    til_sig ~ til_rho,
+    tmb_sig ~ tmb_rho,
+    TRUE ~ NA_real_
+  )
   case_when(
-    til_sig & tmb_sig & til_rho >= 0 & tmb_rho >= 0 ~ "TIL/TMB rho positive",
-    til_sig & tmb_sig & til_rho < 0 & tmb_rho < 0 ~ "TIL/TMB rho negative",
-    til_sig & tmb_sig ~ "Discordant TIL/TMB rho",
-    til_sig & til_rho >= 0 ~ "TIL rho positive",
-    til_sig & til_rho < 0 ~ "TIL rho negative",
-    tmb_sig & tmb_rho >= 0 ~ "TMB rho positive",
-    tmb_sig & tmb_rho < 0 ~ "TMB rho negative",
+    (til_sig | tmb_sig) & is.finite(best_rho) & best_rho >= 0 ~ "posi",
+    (til_sig | tmb_sig) & is.finite(best_rho) & best_rho < 0 ~ "nega",
     TRUE ~ "Not significant"
   )
 }
@@ -158,6 +170,8 @@ read_domain <- function(file) {
       activity_dominant_group = factor(activity_dominant_group, levels = group_order),
       display_layer = if_else(modality == "METH", "TSS methylation", "RNA expression"),
       display_layer = factor(display_layer, levels = modality_order),
+      Family6 = harmonize_family(Family6),
+      gene_label = str_remove(gene_label, "\\s*\\[[MR]\\]$"),
       Family6 = factor(Family6, levels = names(family_cols)),
       gene_layer = paste0(gene_label, if_else(modality == "METH", " | TSS methylation", " | RNA")),
       program = paste0(activity_dominant_group, "\n", display_layer)
@@ -172,7 +186,8 @@ biomarker_long <- read_csv(file.path(landscape_dir, "group_biomarker_long_values
     activity_z = value_z,
     activity_z_clip = pmax(pmin(activity_z, 2.25), -2.25),
     layer_short = if_else(modality == "METH", "M", "R"),
-    gene_label = paste0(gene, " [", layer_short, "]"),
+    gene_label = gene,
+    Family6 = harmonize_family(Family6),
     Family6 = factor(Family6, levels = names(family_cols))
   )
 
@@ -240,7 +255,7 @@ replace_immune_activity <- function(df) {
       immune_recalc %>%
         select(
           gene, modality, til_activity_rho, tmb_activity_rho, til_activity_fdr, tmb_activity_fdr,
-          immune_activity_strength, immune_activity_quadrant, n_TIL, n_TMB
+          immune_activity_strength, immune_activity_quadrant, n_TIL, n_TMB, p_TIL_raw, p_TMB_raw
         ),
       by = c("gene", "modality")
     )
@@ -251,8 +266,8 @@ domain_marker <- read_domain("group_defined_marker_domain_input_tss_low_activity
   mutate(
     os_sig = os_sig %in% TRUE,
     drug_sig = drug_sig %in% TRUE & !str_detect(coalesce(drug_class_clean, ""), regex("Other|exploratory", ignore_case = TRUE)),
-    til_sig = is.finite(til_activity_rho) & is.finite(til_activity_fdr) & til_activity_fdr < 0.10,
-    tmb_sig = is.finite(tmb_activity_rho) & is.finite(tmb_activity_fdr) & tmb_activity_fdr < 0.10,
+    til_sig = is.finite(til_activity_rho) & is.finite(p_TIL_raw) & p_TIL_raw < 0.05,
+    tmb_sig = is.finite(tmb_activity_rho) & is.finite(p_TMB_raw) & p_TMB_raw < 0.05,
     immune_sig = immune_sig %in% TRUE & (til_sig | tmb_sig),
     os_status = case_when(os_sig & os_activity_direction == "Protective" ~ "Protective",
                           os_sig & os_activity_direction == "Adverse" ~ "Adverse",
@@ -260,7 +275,11 @@ domain_marker <- read_domain("group_defined_marker_domain_input_tss_low_activity
     drug_status = case_when(drug_sig & depmap_activity_direction == "Sensitive" ~ "Sensitive",
                             drug_sig & depmap_activity_direction == "Resistant" ~ "Resistant",
                             TRUE ~ "Not significant"),
-    immune_status = if_else(immune_sig, immune_score_status(til_activity_rho, til_activity_fdr, tmb_activity_rho, tmb_activity_fdr), "Not significant")
+    immune_status = if_else(
+      immune_sig,
+      immune_score_status(til_activity_rho, p_TIL_raw, tmb_activity_rho, p_TMB_raw, fdr_cutoff = 0.05),
+      "Not significant"
+    )
   )
 
 os_endpoint <- read_domain("OS_group_defined_marker_endpoint_results.csv") %>%
@@ -271,8 +290,24 @@ os_endpoint <- read_domain("OS_group_defined_marker_endpoint_results.csv") %>%
   )
 
 depmap_best <- read_domain("DepMap_group_defined_marker_best_drug_results.csv") %>%
+  left_join(
+    read_csv(
+      file.path(validation_dir, "depmap_all_candidate_best_hits_by_omics.csv"),
+      show_col_types = FALSE
+    ) %>%
+      transmute(
+        gene,
+        modality = omics,
+        depmap_p = as.numeric(p),
+        depmap_metric = metric,
+        depmap_n = as.numeric(n),
+        depmap_raw_rho = as.numeric(rho)
+      ) %>%
+      distinct(gene, modality, .keep_all = TRUE),
+    by = c("gene", "modality")
+  ) %>%
   mutate(
-    drug_sig = depmap_fdr < 0.25 & feature_available %in% TRUE &
+    drug_sig = depmap_p < 0.05 & feature_available %in% TRUE &
       !str_detect(coalesce(drug_class_clean, ""), regex("Other|exploratory", ignore_case = TRUE)),
     drug_status = case_when(drug_sig & depmap_activity_direction == "Sensitive" ~ "Sensitive",
                             drug_sig & depmap_activity_direction == "Resistant" ~ "Resistant",
@@ -284,10 +319,15 @@ immune_best <- read_domain("Immune_group_defined_marker_til_tmb_results.csv") %>
   replace_immune_activity() %>%
   mutate(
     immune_best_fdr = pmin(til_activity_fdr, tmb_activity_fdr, na.rm = TRUE),
-    til_sig = is.finite(til_activity_rho) & is.finite(til_activity_fdr) & til_activity_fdr < 0.10,
-    tmb_sig = is.finite(tmb_activity_rho) & is.finite(tmb_activity_fdr) & tmb_activity_fdr < 0.10,
+    immune_best_p = pmin(coalesce(p_TIL_raw, 1), coalesce(p_TMB_raw, 1)),
+    til_sig = is.finite(til_activity_rho) & is.finite(p_TIL_raw) & p_TIL_raw < 0.05,
+    tmb_sig = is.finite(tmb_activity_rho) & is.finite(p_TMB_raw) & p_TMB_raw < 0.05,
     immune_sig = til_sig | tmb_sig,
-    immune_status = if_else(immune_sig, immune_score_status(til_activity_rho, til_activity_fdr, tmb_activity_rho, tmb_activity_fdr), "Not significant")
+    immune_status = if_else(
+      immune_sig,
+      immune_score_status(til_activity_rho, p_TIL_raw, tmb_activity_rho, p_TMB_raw, fdr_cutoff = 0.05),
+      "Not significant"
+    )
   )
 
 # Recompute dominance on the displayed feature scale:
@@ -329,7 +369,8 @@ activity_dominance <- activity_group_means %>%
       gene, modality, os_sig, drug_sig, immune_sig, os_status, drug_status, immune_status,
       os_best_endpoint, os_activity_direction, drug_clean, drug_class_clean,
       depmap_activity_direction, immune_activity_quadrant,
-      til_activity_rho, tmb_activity_rho, til_activity_fdr, tmb_activity_fdr, til_sig, tmb_sig
+      til_activity_rho, tmb_activity_rho, til_activity_fdr, tmb_activity_fdr,
+      p_TIL_raw, p_TMB_raw, til_sig, tmb_sig
     ),
     by = c("gene", "modality")
   ) %>%
@@ -345,7 +386,25 @@ activity_dominance <- activity_group_means %>%
 
 write_csv(activity_dominance, file.path(table_dir, "activity_scale_group_dominance_with_domain_evidence.csv"))
 
-rna_meth_alignment <- read_csv(file.path(landscape_dir, "rna_meth_tss_inverse_alignment.csv"), show_col_types = FALSE)
+sample_rna_meth_stats <- biomarker_long %>%
+  select(Sample, gene, modality, activity_z) %>%
+  filter(modality %in% c("RNA", "METH")) %>%
+  distinct(Sample, gene, modality, .keep_all = TRUE) %>%
+  pivot_wider(names_from = modality, values_from = activity_z) %>%
+  group_by(gene) %>%
+  group_modify(~ {
+    stat <- safe_cor(.x$RNA, .x$METH)
+    tibble(sample_spearman_p = stat$p[1])
+  }) %>%
+  ungroup() %>%
+  mutate(
+    sample_spearman_fdr = p.adjust(sample_spearman_p, method = "BH"),
+    sample_spearman_sig = is.finite(sample_spearman_p) & sample_spearman_p < 0.05
+  )
+
+rna_meth_alignment <- read_csv(file.path(landscape_dir, "rna_meth_tss_inverse_alignment.csv"), show_col_types = FALSE) %>%
+  select(-any_of(c("sample_spearman_p", "sample_spearman_fdr", "sample_spearman_sig"))) %>%
+  left_join(sample_rna_meth_stats, by = "gene")
 write_csv(rna_meth_alignment, file.path(table_dir, "rna_meth_alignment_reused_for_contextual_figures.csv"))
 
 # ---------------------------------------------------------------------------
@@ -375,12 +434,17 @@ heat_df <- biomarker_long %>%
 
 cor_strip <- row_order %>%
   select(feature_id, gene, modality) %>%
-  left_join(rna_meth_alignment %>% select(gene, sample_spearman_rho, group_spearman_rho, inverse_consistency_class), by = "gene") %>%
-  pivot_longer(c(sample_spearman_rho, group_spearman_rho), names_to = "cor_type", values_to = "rho") %>%
+  left_join(
+    rna_meth_alignment %>%
+      select(gene, sample_spearman_rho, sample_spearman_p, sample_spearman_sig, inverse_consistency_class),
+    by = "gene"
+  ) %>%
   mutate(
     feature_id = factor(feature_id, levels = feature_levels),
-    cor_type = recode(cor_type, sample_spearman_rho = "sample rho", group_spearman_rho = "group rho"),
-    x = n_samples + recode(cor_type, "sample rho" = 4.5, "group rho" = 6.25)
+    cor_type = "sample rho",
+    rho = sample_spearman_rho,
+    x = n_samples + 4.5,
+    rho_label = sample_rho_label(rho, sample_spearman_p)
   )
 
 domain_strip <- row_order %>%
@@ -391,7 +455,7 @@ domain_strip <- row_order %>%
   mutate(
     domain = recode(domain, os_sig = "OS", drug_sig = "DepMap", immune_sig = "Immune"),
     feature_id = factor(feature_id, levels = feature_levels),
-    x = n_samples + recode(domain, "OS" = 9.10, "DepMap" = 11.05, "Immune" = 13.00),
+    x = n_samples + recode(domain, "OS" = 7.10, "DepMap" = 9.05, "Immune" = 11.00),
     domain_fill = if_else(present, domain, "none")
   )
 
@@ -405,7 +469,7 @@ p_track <- ggplot() +
   geom_point(data = sample_track, aes(sample_x, pt_scaled, color = group_label), size = 0.45, alpha = 0.8) +
   scale_fill_manual(values = group_cols, guide = "none") +
   scale_color_manual(values = group_cols, guide = "none") +
-  scale_x_continuous(limits = c(0.5, n_samples + 15.4), expand = c(0, 0)) +
+  scale_x_continuous(limits = c(0.5, n_samples + 13.2), expand = c(0, 0)) +
   scale_y_continuous(limits = c(0.55, 2.35), breaks = c(1, 1.85), labels = c("EOBC", "PT"), expand = c(0, 0)) +
   theme_void(base_family = "Arial") +
   theme(
@@ -423,6 +487,7 @@ p_heat <- ggplot() +
   ) +
   ggnewscale::new_scale_fill() +
   geom_tile(data = cor_strip, aes(x, feature_id, fill = rho), width = 1.35, height = 0.92, color = "white", linewidth = 0.22) +
+  geom_text(data = cor_strip, aes(x, feature_id, label = rho_label), size = 1.85, color = "#111827") +
   scale_fill_gradient2(
     low = "#3265A8", mid = "#F8FAFC", high = "#C92A2A",
     midpoint = 0, limits = c(-1, 1), oob = squish,
@@ -432,12 +497,12 @@ p_heat <- ggplot() +
   geom_tile(data = domain_strip, aes(x, feature_id, fill = domain_fill), width = 1.55, height = 0.80, color = "#CBD5E1", linewidth = 0.22) +
   scale_fill_manual(values = c(domain_cols, "none" = "#F8FAFC"), breaks = names(domain_cols), name = "Domain\nevidence") +
   geom_vline(xintercept = n_samples + 2.45, color = "#111827", linewidth = 0.25) +
-  geom_vline(xintercept = n_samples + 7.62, color = "#111827", linewidth = 0.25) +
+  geom_vline(xintercept = n_samples + 5.75, color = "#111827", linewidth = 0.25) +
   facet_grid(display_layer ~ ., scales = "free_y", space = "free_y") +
   scale_x_continuous(
-    limits = c(0.5, n_samples + 15.4),
-    breaks = n_samples + c(4.5, 6.25, 9.10, 11.05, 13.00),
-    labels = c("sample\nrho", "group\nrho", "OS", "Drug", "Imm"),
+    limits = c(0.5, n_samples + 13.2),
+    breaks = n_samples + c(4.5, 7.10, 9.05, 11.00),
+    labels = c("sample\nrho", "OS", "Drug", "Imm"),
     expand = c(0, 0)
   ) +
   scale_y_discrete(labels = feature_labels) +
@@ -446,7 +511,7 @@ p_heat <- ggplot() +
     subtitle = "Columns are tumors ordered by EOBC group and pseudotime. RNA rows show expression z-scores; methylation rows show raw TSS beta-value z-scores.",
     x = NULL,
     y = NULL,
-    caption = "RNA rows show expression z-scores and TSS methylation rows show raw beta-value z-scores. sample rho is Spearman correlation across matched tumors; group rho is Spearman correlation across the four EOBC group means. Negative RNA-METH rho supports promoter methylation-linked transcriptional repression."
+    caption = "RNA rows show expression z-scores and TSS methylation rows show raw beta-value z-scores. sample rho is Spearman correlation across matched tumors; * marks nominal Spearman p < 0.05. Negative RNA-METH rho supports promoter methylation-linked transcriptional repression."
   ) +
   theme_eobc(base_size = 8.2) +
   theme(
@@ -491,6 +556,7 @@ make_activity_heat_panel <- function(layer_name, show_x = FALSE, show_legend = T
     ) +
     ggnewscale::new_scale_fill() +
     geom_tile(data = cdat, aes(x, feature_id, fill = rho), width = 1.35, height = 0.92, color = "white", linewidth = 0.22) +
+    geom_text(data = cdat, aes(x, feature_id, label = rho_label), size = 1.75, color = "#111827") +
     scale_fill_gradient2(
       low = "#3265A8", mid = "#F8FAFC", high = "#C92A2A",
       midpoint = 0, limits = c(-1, 1), oob = squish,
@@ -500,11 +566,11 @@ make_activity_heat_panel <- function(layer_name, show_x = FALSE, show_legend = T
     geom_tile(data = ddat, aes(x, feature_id, fill = domain_fill), width = 1.55, height = 0.80, color = "#CBD5E1", linewidth = 0.22) +
     scale_fill_manual(values = c(domain_cols, "none" = "#F8FAFC"), breaks = names(domain_cols), name = "Domain\nevidence") +
     geom_vline(xintercept = n_samples + 2.45, color = "#111827", linewidth = 0.24) +
-    geom_vline(xintercept = n_samples + 7.62, color = "#111827", linewidth = 0.24) +
+    geom_vline(xintercept = n_samples + 5.75, color = "#111827", linewidth = 0.24) +
     scale_x_continuous(
-      limits = c(0.5, n_samples + 15.4),
-      breaks = if (show_x) n_samples + c(4.5, 6.25, 9.10, 11.05, 13.00) else NULL,
-      labels = if (show_x) c("sample\nrho", "group\nrho", "OS", "Drug", "Imm") else NULL,
+      limits = c(0.5, n_samples + 13.2),
+      breaks = if (show_x) n_samples + c(4.5, 7.10, 9.05, 11.00) else NULL,
+      labels = if (show_x) c("sample\nrho", "OS", "Drug", "Imm") else NULL,
       expand = c(0, 0)
     ) +
     scale_y_discrete(labels = feature_labels[layer_levels]) +
@@ -530,7 +596,7 @@ fig_heat_refined <- p_track / p_heat_rna / p_heat_tss +
   plot_annotation(
     title = "A. EOBC biomarker expression and TSS methylation heatmap with RNA-TSS coupling",
     subtitle = "Columns are tumors ordered by EOBC group and pseudotime. RNA rows show expression z-scores; methylation rows show raw TSS beta-value z-scores.",
-    caption = "M denotes raw TSS methylation beta-value z-score. sample rho is Spearman correlation across matched tumors; group rho is Spearman correlation across the four EOBC group means. Negative RNA-METH rho supports promoter methylation-linked transcriptional repression.",
+    caption = "M denotes raw TSS methylation beta-value z-score. sample rho is Spearman correlation across matched tumors; * marks nominal Spearman p < 0.05. Negative RNA-METH rho supports promoter methylation-linked transcriptional repression.",
     theme = theme(
       plot.title = element_text(face = "bold", size = 18, color = "#111827", margin = margin(b = 5)),
       plot.subtitle = element_text(size = 11, color = "#64748B", margin = margin(b = 8)),
@@ -745,11 +811,11 @@ domain_counts <- domain_marker %>%
     sensitive_count = sum(drug_sig & drug_status == "Sensitive", na.rm = TRUE),
     resistant_count = sum(drug_sig & drug_status == "Resistant", na.rm = TRUE),
     immune_count = sum(immune_sig, na.rm = TRUE),
-    immune_pos_count = sum(immune_sig & str_detect(immune_status, "positive"), na.rm = TRUE),
-    immune_neg_count = sum(immune_sig & str_detect(immune_status, "negative"), na.rm = TRUE),
+    immune_pos_count = sum(immune_sig & immune_status == "posi", na.rm = TRUE),
+    immune_neg_count = sum(immune_sig & immune_status == "nega", na.rm = TRUE),
     immune_til_count = sum(immune_sig & str_detect(immune_status, "TIL"), na.rm = TRUE),
     immune_tmb_count = sum(immune_sig & str_detect(immune_status, "TMB"), na.rm = TRUE),
-    immune_discordant_count = sum(immune_sig & immune_status == "Discordant TIL/TMB rho", na.rm = TRUE),
+    immune_discordant_count = 0L,
     .groups = "drop"
   ) %>%
   rename(group_label = activity_dominant_group)
@@ -792,9 +858,9 @@ trajectory_domain_df <- trajectory_domain_df %>%
                              resistant_count > sensitive_count ~ "Resistance-rich",
                              drug_count > 0 ~ "Mixed drug",
                              TRUE ~ "No drug evidence"),
-    immune_balance = case_when(immune_pos_count > immune_neg_count ~ "Positive rho-linked",
-                               immune_neg_count > immune_pos_count ~ "Negative rho-linked",
-                               immune_discordant_count > 0 ~ "Discordant TIL/TMB rho",
+    immune_balance = case_when(immune_pos_count > immune_neg_count ~ "posi",
+                               immune_neg_count > immune_pos_count ~ "nega",
+                               immune_discordant_count > 0 ~ "Mixed score evidence",
                                immune_count > 0 ~ "Mixed score evidence",
                                TRUE ~ "No immune evidence")
   )
@@ -835,7 +901,7 @@ p_traj_immune <- plot_domain_trajectory(
   immune_count,
   immune_balance,
   scale_fill_manual(
-    values = c("Positive rho-linked" = "#17A2A4", "Negative rho-linked" = "#72A950", "Discordant TIL/TMB rho" = "#B9C4D1", "Mixed score evidence" = "#D1D9E6", "No immune evidence" = "white"),
+    values = c("posi" = "#17A2A4", "nega" = "#72A950", "Mixed score evidence" = "#D1D9E6", "No immune evidence" = "white"),
     name = "Immune direction", drop = FALSE
   ),
   "H. Family trajectories annotated with TIL/TMB immune evidence",
@@ -950,13 +1016,13 @@ os_state_domain_v3 <- os_endpoint %>%
     os_domain_p = p,
     os_domain_fdr = q,
     domain_x = activity_beta,
-    domain_y = safe_neglog(q, 12),
+    domain_y = safe_neglog(p, 12),
     domain_effect_abs = abs(activity_beta),
     os_selected = selected
   ) %>%
   inner_join(domain_plot_context, by = c("gene", "modality")) %>%
   mutate(
-    os_sig = os_sig %in% TRUE | os_selected | (!is.na(os_domain_p) & os_domain_p < 0.05),
+    os_sig = !is.na(os_domain_p) & os_domain_p < 0.05,
     os_status = case_when(
       os_sig & domain_x < 0 ~ "Protective",
       os_sig & domain_x > 0 ~ "Adverse",
@@ -975,10 +1041,11 @@ depmap_state_domain_v3 <- depmap_best %>%
   mutate(
     drug_sig = drug_sig %in% TRUE,
     domain_x = depmap_activity_rho,
-    domain_y = safe_neglog(depmap_fdr, 12),
+    domain_y = safe_neglog(depmap_p, 12),
     domain_fdr = depmap_fdr,
+    domain_p = depmap_p,
     domain_effect_abs = abs(depmap_activity_rho),
-    domain_metric = "Best DepMap drug-response association"
+    domain_metric = "Best DepMap drug-response Spearman correlation"
   )
 
 immune_state_domain_v3 <- immune_best %>%
@@ -988,14 +1055,16 @@ immune_state_domain_v3 <- immune_best %>%
   ) %>%
   mutate(
     immune_best_fdr = pmin(coalesce(til_activity_fdr, 1), coalesce(tmb_activity_fdr, 1)),
+    immune_best_p = pmin(coalesce(p_TIL_raw, 1), coalesce(p_TMB_raw, 1)),
     immune_best_metric = if_else(
-      coalesce(til_activity_fdr, 1) <= coalesce(tmb_activity_fdr, 1),
+      coalesce(p_TIL_raw, 1) <= coalesce(p_TMB_raw, 1),
       "TIL rho",
       "TMB rho"
     ),
     domain_x = if_else(immune_best_metric == "TIL rho", til_activity_rho, tmb_activity_rho),
-    domain_y = safe_neglog(immune_best_fdr, 12),
+    domain_y = safe_neglog(immune_best_p, 12),
     domain_fdr = immune_best_fdr,
+    domain_p = immune_best_p,
     domain_effect_abs = abs(domain_x),
     immune_sig = immune_sig %in% TRUE,
     domain_metric = "Best TIL/TMB Spearman association"
@@ -1028,17 +1097,14 @@ make_group_activity_panel <- function(layer_name, show_x = FALSE, show_legend = 
   cor_strip2 <- layer_rows %>%
     select(y, gene, modality) %>%
     left_join(
-      rna_meth_alignment %>% select(gene, sample_spearman_rho, group_spearman_rho),
+      rna_meth_alignment %>% select(gene, sample_spearman_rho, sample_spearman_p, sample_spearman_sig),
       by = "gene"
     ) %>%
-    pivot_longer(
-      c(sample_spearman_rho, group_spearman_rho),
-      names_to = "rho_type",
-      values_to = "rho"
-    ) %>%
     mutate(
-      x = if_else(rho_type == "sample_spearman_rho", 5.15, 5.72),
-      rho_label = if_else(abs(rho) >= 0.30, sprintf("%.2f", rho), "")
+      rho_type = "sample_spearman_rho",
+      rho = sample_spearman_rho,
+      x = 5.15,
+      rho_label = sample_rho_label(rho, sample_spearman_p)
     )
 
   domain_strip2 <- layer_rows %>%
@@ -1051,7 +1117,7 @@ make_group_activity_panel <- function(layer_name, show_x = FALSE, show_legend = 
     pivot_longer(c(os_sig, drug_sig, immune_sig), names_to = "domain", values_to = "present") %>%
     mutate(
       domain = recode(domain, os_sig = "OS", drug_sig = "DepMap", immune_sig = "Immune"),
-      x = recode(domain, "OS" = 6.70, "DepMap" = 7.40, "Immune" = 8.10),
+      x = recode(domain, "OS" = 6.10, "DepMap" = 6.80, "Immune" = 7.50),
       domain_fill = if_else(present, domain, "none")
     )
 
@@ -1073,9 +1139,9 @@ make_group_activity_panel <- function(layer_name, show_x = FALSE, show_legend = 
     geom_tile(
       data = cor_strip2,
       aes(x, y, fill = rho),
-      width = 0.48, height = 0.86, color = "white", linewidth = 0.22
+      width = 0.58, height = 0.86, color = "white", linewidth = 0.22
     ) +
-    geom_text(data = cor_strip2, aes(x, y, label = rho_label), size = 1.85, color = "#111827") +
+    geom_text(data = cor_strip2, aes(x, y, label = rho_label), size = 1.75, color = "#111827") +
     scale_fill_gradient2(
       low = "#3265A8", mid = "#F8FAFC", high = "#C92A2A",
       midpoint = 0, limits = c(-0.8, 0.8), oob = squish,
@@ -1093,11 +1159,11 @@ make_group_activity_panel <- function(layer_name, show_x = FALSE, show_legend = 
       name = "Domain\nevidence"
     ) +
     geom_vline(xintercept = 4.55, color = "#111827", linewidth = 0.26) +
-    geom_vline(xintercept = 6.18, color = "#111827", linewidth = 0.26) +
+    geom_vline(xintercept = 5.70, color = "#111827", linewidth = 0.26) +
     scale_x_continuous(
-      limits = c(0.08, 8.42),
-      breaks = c(0.28, 1:4, 5.15, 5.72, 6.70, 7.40, 8.10),
-      labels = if (show_x) c("Family", short_group, "sample\nrho", "group\nrho", "OS", "Drug", "Imm") else rep("", 10),
+      limits = c(0.08, 7.82),
+      breaks = c(0.28, 1:4, 5.15, 6.10, 6.80, 7.50),
+      labels = if (show_x) c("Family", short_group, "sample\nrho", "OS", "Drug", "Imm") else rep("", 9),
       expand = c(0, 0)
     ) +
     scale_y_continuous(
@@ -1126,7 +1192,7 @@ fig_group_activity_heat <- p_group_heat_rna / p_group_heat_meth +
   plot_annotation(
     title = "A. EOBC group-defining biomarker expression/methylation map with RNA-TSS methylation coupling",
     subtitle = "Tiles show group mean z-scores for RNA expression and raw TSS methylation. Blue RNA-TSS rho supports promoter methylation-linked repression.",
-    caption = "Rows are ordered by the highest EOBC group for each biomarker. Right-side strips show matched RNA/TSS methylation coupling and whether the biomarker has OS, DepMap, or immune evidence.",
+    caption = "Rows are ordered by the highest EOBC group for each biomarker. sample rho is across matched tumors; * marks nominal Spearman p < 0.05. Domain strips mark OS, DepMap, or immune evidence.",
     theme = theme(
       plot.title = element_text(face = "bold", size = 18, color = "#111827"),
       plot.subtitle = element_text(size = 10.4, color = "#64748B", margin = margin(b = 6)),
@@ -1161,23 +1227,50 @@ domain_sig_label <- function(df, domain = c("OS", "DepMap", "Immune")) {
       )
   }
   if (domain == "OS") {
+    if ("domain_size_fdr" %in% names(df)) {
+      df <- df %>% mutate(os_plot_sig = is.finite(domain_size_fdr) & domain_size_fdr < 0.05)
+    } else if ("domain_p" %in% names(df)) {
+      df <- df %>% mutate(os_plot_sig = is.finite(domain_p) & domain_p < 0.05)
+    } else if ("os_domain_p" %in% names(df)) {
+      df <- df %>% mutate(os_plot_sig = is.finite(os_domain_p) & os_domain_p < 0.05)
+    } else {
+      df <- df %>% mutate(os_plot_sig = os_sig %in% TRUE)
+    }
     df %>%
-      filter(os_sig, is.finite(domain_x), is.finite(domain_y)) %>%
+      filter(os_plot_sig, is.finite(domain_x), is.finite(domain_y)) %>%
       mutate(
         endpoint_short = recode(as.character(os_best_endpoint), !!!short_endpoint, .default = as.character(os_best_endpoint)),
         domain_label = paste0(gene_label, "\n", endpoint_short, " ", os_status),
         domain_status = os_status
       )
   } else if (domain == "DepMap") {
+    if ("domain_size_fdr" %in% names(df)) {
+      df <- df %>% mutate(depmap_plot_sig = is.finite(domain_size_fdr) & domain_size_fdr < 0.05 & drug_sig %in% TRUE)
+    } else if ("domain_p" %in% names(df)) {
+      df <- df %>% mutate(depmap_plot_sig = is.finite(domain_p) & domain_p < 0.05 & drug_sig %in% TRUE)
+    } else if ("depmap_p" %in% names(df)) {
+      df <- df %>% mutate(depmap_plot_sig = is.finite(depmap_p) & depmap_p < 0.05 & drug_sig %in% TRUE)
+    } else {
+      df <- df %>% mutate(depmap_plot_sig = drug_sig %in% TRUE)
+    }
     df %>%
-      filter(drug_sig, is.finite(domain_x), is.finite(domain_y)) %>%
+      filter(depmap_plot_sig, is.finite(domain_x), is.finite(domain_y)) %>%
       mutate(
         domain_label = paste0(gene_label, "\n", drug_clean, " ", drug_status),
         domain_status = drug_status
       )
   } else {
+    if ("domain_size_fdr" %in% names(df)) {
+      df <- df %>% mutate(immune_plot_sig = is.finite(domain_size_fdr) & domain_size_fdr < 0.05)
+    } else if ("domain_p" %in% names(df)) {
+      df <- df %>% mutate(immune_plot_sig = is.finite(domain_p) & domain_p < 0.05)
+    } else if ("immune_best_p" %in% names(df)) {
+      df <- df %>% mutate(immune_plot_sig = is.finite(immune_best_p) & immune_best_p < 0.05)
+    } else {
+      df <- df %>% mutate(immune_plot_sig = immune_sig %in% TRUE)
+    }
     df %>%
-      filter(immune_sig, is.finite(domain_x), is.finite(domain_y)) %>%
+      filter(immune_plot_sig, is.finite(domain_x), is.finite(domain_y)) %>%
       mutate(
         domain_label = paste0(
           gene_label, "\n", immune_status,
@@ -1200,8 +1293,75 @@ domain_axis_limits <- function(plot_df, fdr_thresholds) {
   )
 }
 
+domain_significance_table <- function(domain = c("OS", "DepMap", "Immune")) {
+  domain <- match.arg(domain)
+  if (domain == "OS") {
+    os_endpoint %>%
+      mutate(
+        p = as.numeric(p),
+        q = as.numeric(q),
+        selected = selected %in% TRUE
+      ) %>%
+      group_by(gene, modality) %>%
+      arrange(p, q, desc(selected), .by_group = TRUE) %>%
+      slice_head(n = 1) %>%
+      ungroup() %>%
+      transmute(gene, modality, domain_size_fdr = p)
+  } else if (domain == "DepMap") {
+    depmap_best %>%
+      transmute(gene, modality, domain_size_fdr = as.numeric(depmap_p))
+  } else {
+    immune_best %>%
+      transmute(
+        gene,
+        modality,
+        domain_size_fdr = pmin(
+          coalesce(as.numeric(p_TIL_raw), 1),
+          coalesce(as.numeric(p_TMB_raw), 1)
+        )
+      )
+  }
+}
+
+add_domain_significance_size <- function(df, domain = c("OS", "DepMap", "Immune")) {
+  domain <- match.arg(domain)
+  sig_col <- switch(domain, OS = "os_sig", DepMap = "drug_sig", Immune = "immune_sig")
+  out <- df %>%
+    left_join(domain_significance_table(domain), by = c("gene", "modality")) %>%
+    mutate(
+      domain_size_score_raw = safe_neglog(domain_size_fdr, 12)
+    )
+
+  if (domain == "OS") {
+    out <- out %>%
+      mutate(domain_nominal_sig = is.finite(domain_size_fdr) & domain_size_fdr < 0.05)
+  } else if (domain == "DepMap") {
+    out <- out %>%
+      mutate(
+        domain_nominal_sig = is.finite(domain_size_fdr) & domain_size_fdr < 0.05 &
+          .data[[sig_col]] %in% TRUE
+      )
+  } else if (domain == "Immune") {
+    out <- out %>%
+      mutate(domain_nominal_sig = is.finite(domain_size_fdr) & domain_size_fdr < 0.05)
+  } else {
+    out <- out %>%
+      mutate(domain_nominal_sig = .data[[sig_col]] %in% TRUE)
+  }
+
+  out %>%
+    mutate(
+      domain_size_score = if_else(
+        domain_nominal_sig & is.finite(domain_size_score_raw),
+        pmax(domain_size_score_raw, 0.18),
+        0.10
+      )
+    )
+}
+
 state_domain_scatter <- function(df, domain, title, subtitle, status_values, status_name, file_name) {
-  sig_df <- domain_sig_label(df, domain)
+  plot_df <- add_domain_significance_size(df, domain)
+  sig_df <- domain_sig_label(plot_df, domain)
   status_col <- if (domain == "OS") {
     "os_status"
   } else if (domain == "DepMap") {
@@ -1209,17 +1369,24 @@ state_domain_scatter <- function(df, domain, title, subtitle, status_values, sta
   } else {
     "immune_status"
   }
+  size_name <- switch(
+    domain,
+    OS = "-log10(Cox\np-value)",
+    DepMap = "-log10(DepMap drug-response\nSpearman p-value)",
+    Immune = "-log10(TIL/TMB\nSpearman p-value)"
+  )
 
-  p <- ggplot(df, aes(activity_contrast_z, neg_log10_fdr)) +
+  p <- ggplot(plot_df, aes(activity_contrast_z, neg_log10_fdr)) +
     geom_hline(yintercept = -log10(0.10), color = "#FFB26B", linewidth = 0.35, linetype = "dotted") +
     geom_hline(yintercept = -log10(0.05), color = "#FF6B6B", linewidth = 0.45, linetype = "longdash") +
     geom_point(
-      aes(fill = Family6, shape = activity_dominant_group, size = pmax(abs(dominant_mean_z), 0.10)),
-      color = alpha("#94A3B8", 0.52), stroke = 0.72, alpha = 0.36
+      aes(fill = Family6, size = domain_size_score),
+      shape = 21, color = alpha("#94A3B8", 0.52), stroke = 0.72, alpha = 0.34
     ) +
     geom_point(
       data = sig_df,
-      aes(fill = Family6, shape = activity_dominant_group, size = pmax(abs(dominant_mean_z), 0.10), color = .data[[status_col]]),
+      aes(fill = Family6, size = domain_size_score, color = .data[[status_col]]),
+      shape = 21,
       stroke = 1.35, alpha = 0.98
     ) +
     geom_label_repel(
@@ -1241,8 +1408,7 @@ state_domain_scatter <- function(df, domain, title, subtitle, status_values, sta
     ) +
     facet_grid(display_layer ~ activity_dominant_group) +
     scale_fill_manual(values = family_cols, name = "Biomarker family", drop = FALSE) +
-    scale_shape_manual(values = group_shapes, name = "Highest EOBC group", drop = FALSE) +
-    scale_size_continuous(range = c(1.8, 6.0), name = "|Dominant\nmean z|") +
+    scale_size_continuous(range = c(1.6, 6.2), name = size_name, breaks = c(0.5, 1, 1.5, 2, 3)) +
     scale_color_manual(values = status_values, name = status_name, drop = FALSE) +
     coord_cartesian(ylim = c(0, 12.7), clip = "off") +
     labs(
@@ -1260,6 +1426,11 @@ state_domain_scatter <- function(df, domain, title, subtitle, status_values, sta
       strip.text = element_text(size = 8.2, face = "bold"),
       plot.title = element_text(size = 16, face = "bold"),
       plot.subtitle = element_text(size = 9.4)
+    ) +
+    guides(
+      fill = guide_legend(nrow = 2, byrow = TRUE, override.aes = list(shape = 21, color = "#111827", size = 3.0, alpha = 1, stroke = 0.7)),
+      color = guide_legend(nrow = if (domain == "Immune") 2 else 1, byrow = TRUE, override.aes = list(shape = 21, fill = "white", size = 3.0, alpha = 1, stroke = 1.0)),
+      size = guide_legend(nrow = 1, byrow = TRUE, override.aes = list(shape = 21, color = "#111827", fill = "black", alpha = 1))
     )
   save_plot(p, file_name, 13.6, 7.6)
   p
@@ -1269,7 +1440,7 @@ p_os_state_v2 <- state_domain_scatter(
   activity_dominance,
   "OS",
   "C. OS-linked biomarkers within EOBC group-defining programs",
-  "Each panel is one EOBC state and omics layer; colored outlines label group-defining markers with significant OS evidence.",
+  "Each panel is one EOBC state and omics layer; point size encodes best-endpoint Cox regression p-value and colored outlines mark OS direction.",
   os_cols,
   "OS evidence",
   "Figure_02A_OS_state_resolved_group_marker_evidence_R_v2"
@@ -1279,7 +1450,7 @@ p_depmap_state_v2 <- state_domain_scatter(
   activity_dominance,
   "DepMap",
   "D. DepMap-linked biomarkers within EOBC group-defining programs",
-  "The same group-marker landscape is reused; labels show the best associated drug and whether high biomarker activity marks sensitivity or resistance.",
+  "The same group-marker landscape is reused; point size encodes DepMap drug-response Spearman correlation p-value and labels show the best associated drug.",
   drug_cols,
   "DepMap evidence",
   "Figure_03A_DepMap_state_resolved_group_marker_evidence_R_v2"
@@ -1289,10 +1460,208 @@ p_immune_state_v2 <- state_domain_scatter(
   activity_dominance,
   "Immune",
   "E. Immune-linked biomarkers within EOBC group-defining programs",
-  "Significant TIL/TMB-associated markers are projected onto the EOBC state-specific biomarker dominance landscape.",
+  "Significant TIL/TMB-associated markers are projected onto the EOBC dominance landscape; point size encodes the best TIL/TMB Spearman correlation p-value.",
   immune_cols,
   "Immune evidence",
   "Figure_04A_Immune_state_resolved_group_marker_evidence_R_v2"
+)
+
+# ---------------------------------------------------------------------------
+# Additional domain-only biomarker summary figures. These intentionally remove
+# EOBC G1-G4 paneling so the significant OS, DepMap, and immune markers can be
+# read as compact domain-specific checklists.
+# ---------------------------------------------------------------------------
+
+format_fdr_compact <- function(x) {
+  case_when(
+    !is.finite(x) ~ "FDR NA",
+    x < 0.001 ~ "FDR <0.001",
+    TRUE ~ paste0("FDR ", formatC(x, format = "f", digits = 3))
+  )
+}
+
+format_p_compact <- function(x) {
+  case_when(
+    !is.finite(x) ~ "p NA",
+    x < 0.001 ~ "p <0.001",
+    TRUE ~ paste0("p ", formatC(x, format = "f", digits = 3))
+  )
+}
+
+prepare_domain_summary_rows <- function(df) {
+  df %>%
+    mutate(
+      display_layer = factor(display_layer, levels = modality_order),
+      Family6 = factor(Family6, levels = names(family_cols))
+    ) %>%
+    arrange(display_layer, desc(domain_y), gene_label) %>%
+    mutate(
+      row_id_raw = paste(display_layer, modality, gene, sep = "___"),
+      row_id = factor(row_id_raw, levels = rev(unique(row_id_raw)))
+    )
+}
+
+make_domain_biomarker_summary <- function(plot_df, title, subtitle, x_label,
+                                          status_values, status_name, size_name,
+                                          file_name, width = 11.8, height = 7.2) {
+  if (nrow(plot_df) == 0) {
+    warning("No significant rows available for ", file_name)
+    return(NULL)
+  }
+
+  x_abs <- suppressWarnings(max(abs(plot_df$domain_x), na.rm = TRUE))
+  if (!is.finite(x_abs) || x_abs <= 0) x_abs <- 1
+  x_pad <- max(0.12, x_abs * 0.34)
+  x_limit <- x_abs + x_pad
+
+  plot_df <- plot_df %>%
+    mutate(
+      label_x = domain_x + if_else(domain_x >= 0, x_abs * 0.055, -x_abs * 0.055),
+      detail_hjust = if_else(domain_x >= 0, 0, 1)
+    )
+
+  y_labels <- setNames(plot_df$gene_label, plot_df$row_id_raw)
+
+  p <- ggplot(plot_df, aes(domain_x, row_id)) +
+    geom_vline(xintercept = 0, color = "#94A3B8", linewidth = 0.42, linetype = "longdash") +
+    geom_segment(
+      aes(x = 0, xend = domain_x, yend = row_id),
+      color = "#CBD5E1", linewidth = 0.70, lineend = "round"
+    ) +
+    geom_point(
+      aes(size = domain_y, fill = domain_status, color = Family6),
+      shape = 21, stroke = 1.10, alpha = 0.98
+    ) +
+    geom_text(
+      aes(x = label_x, label = detail_label, hjust = detail_hjust),
+      size = 2.25, color = "#475569", lineheight = 0.90,
+      fontface = "bold", show.legend = FALSE
+    ) +
+    facet_grid(display_layer ~ ., scales = "free_y", space = "free_y") +
+    scale_y_discrete(labels = y_labels) +
+    scale_fill_manual(values = status_values, name = status_name, drop = FALSE) +
+    scale_color_manual(values = family_cols, name = "Biomarker family", drop = FALSE) +
+    scale_size_continuous(
+      range = c(3.0, 8.4),
+      breaks = scales::breaks_pretty(n = 4),
+      name = size_name
+    ) +
+    coord_cartesian(xlim = c(-x_limit, x_limit), clip = "off") +
+    labs(
+      title = title,
+      subtitle = subtitle,
+      x = x_label,
+      y = NULL
+    ) +
+    guides(
+      fill = guide_legend(
+        nrow = 1, byrow = TRUE, order = 1,
+        override.aes = list(shape = 21, color = "#111827", size = 4.2, alpha = 1, stroke = 0.7)
+      ),
+      color = guide_legend(
+        nrow = 2, byrow = TRUE, order = 2,
+        override.aes = list(shape = 21, fill = "white", size = 3.3, alpha = 1, stroke = 1.0)
+      ),
+      size = guide_legend(
+        nrow = 1, byrow = TRUE, order = 3,
+        override.aes = list(shape = 21, color = "#111827", fill = "white", alpha = 1)
+      )
+    ) +
+    theme_eobc(base_size = 8.9) +
+    theme(
+      legend.position = "bottom",
+      legend.box = "vertical",
+      legend.box.just = "center",
+      axis.text.y = element_text(size = 7.7, face = "bold", color = "#111827"),
+      axis.text.x = element_text(size = 7.3),
+      panel.grid.major.y = element_blank(),
+      panel.grid.minor.y = element_blank(),
+      strip.text = element_text(size = 8.8, face = "bold"),
+      plot.title = element_text(size = 15.0, face = "bold"),
+      plot.subtitle = element_text(size = 8.8),
+      plot.margin = margin(10, 68, 16, 68)
+    )
+
+  save_plot(p, file_name, width, height)
+  p
+}
+
+os_biomarker_summary <- os_state_domain_v3 %>%
+  filter(os_sig, is.finite(domain_x), is.finite(domain_y)) %>%
+  mutate(
+    domain_status = factor(os_status, levels = c("Protective", "Adverse")),
+    endpoint_short = recode(
+      os_best_endpoint,
+      "Overall OS" = "Overall",
+      "5-year OS" = "5y",
+      "10-year OS" = "10y",
+      .default = as.character(os_best_endpoint)
+    ),
+    detail_label = paste0(endpoint_short, "\n", format_p_compact(domain_p))
+  ) %>%
+  prepare_domain_summary_rows()
+
+depmap_biomarker_summary <- depmap_state_domain_v3 %>%
+  filter(drug_sig, is.finite(domain_x), is.finite(domain_y)) %>%
+  mutate(
+    domain_status = factor(drug_status, levels = c("Sensitive", "Resistant")),
+    detail_label = paste0(str_wrap(drug_clean, width = 17), "\n", format_p_compact(domain_p))
+  ) %>%
+  prepare_domain_summary_rows()
+
+immune_biomarker_summary <- immune_state_domain_v3 %>%
+  filter(immune_sig, is.finite(domain_x), is.finite(domain_y)) %>%
+  mutate(
+    domain_status = factor(immune_status, levels = c("posi", "nega")),
+    detail_label = paste0(
+      "TIL ", sprintf("%+.2f", til_activity_rho),
+      "\nTMB ", sprintf("%+.2f", tmb_activity_rho),
+      "\n", format_p_compact(domain_p)
+    )
+  ) %>%
+  prepare_domain_summary_rows()
+
+write_csv(os_biomarker_summary, file.path(table_dir, "OS_significant_biomarker_summary_no_group.csv"))
+write_csv(depmap_biomarker_summary, file.path(table_dir, "DepMap_significant_biomarker_summary_no_group.csv"))
+write_csv(immune_biomarker_summary, file.path(table_dir, "Immune_significant_biomarker_summary_no_group.csv"))
+
+p_os_biomarker_summary_v1 <- make_domain_biomarker_summary(
+  os_biomarker_summary,
+  "OS nominal Cox p-value biomarker summary",
+  "EOBC group panels are removed; rows list biomarkers with nominal Cox p < 0.05 by RNA expression or TSS methylation evidence.",
+  "Cox beta for best OS endpoint",
+  os_cols[c("Protective", "Adverse")],
+  "OS evidence",
+  "-log10(Cox\np-value)",
+  "Figure_S2A_OS_significant_biomarker_summary_no_group_R_v1",
+  width = 11.6,
+  height = 6.5
+)
+
+p_depmap_biomarker_summary_v1 <- make_domain_biomarker_summary(
+  depmap_biomarker_summary,
+  "DepMap significant biomarker summary",
+  "EOBC group panels are removed; rows list biomarkers with DepMap drug-response Spearman correlation p < 0.05 and their best associated compound.",
+  "Signed DepMap association with drug response",
+  drug_cols[c("Sensitive", "Resistant")],
+  "DepMap evidence",
+  "-log10(DepMap drug-response\nSpearman p-value)",
+  "Figure_S2B_DepMap_significant_biomarker_summary_no_group_R_v1",
+  width = 12.2,
+  height = 7.4
+)
+
+p_immune_biomarker_summary_v1 <- make_domain_biomarker_summary(
+  immune_biomarker_summary,
+  "Immune significant biomarker summary",
+  "EOBC group panels are removed; immune status is simplified to posi/nega using TIL/TMB Spearman correlation p < 0.05.",
+  "Signed strongest TIL/TMB Spearman rho",
+  immune_cols[c("posi", "nega")],
+  "Immune evidence",
+  "-log10(TIL/TMB\nSpearman p-value)",
+  "Figure_S2C_Immune_significant_biomarker_summary_no_group_R_v1",
+  width = 12.2,
+  height = 8.0
 )
 
 v2_readme <- c(
@@ -1304,6 +1673,7 @@ v2_readme <- c(
   "Figure_02A_OS_state_resolved_group_marker_evidence_R_v2: OS evidence over state-resolved group-marker dominance.",
   "Figure_03A_DepMap_state_resolved_group_marker_evidence_R_v2: DepMap evidence over state-resolved group-marker dominance.",
   "Figure_04A_Immune_state_resolved_group_marker_evidence_R_v2: immune evidence over state-resolved group-marker dominance.",
+  "Figure_S2A/S2B/S2C: domain-only significant biomarker summaries without EOBC group paneling.",
   "",
   "Interpretation note: methylation features are TSS/promoter methylation beta values. Group maps show raw methylation z-scores, while RNA-TSS correlation panels retain raw methylation values and expect negative correlations for transcriptional repression."
 )
@@ -1321,7 +1691,7 @@ fig_group_activity_heat_v3 <- p_group_heat_rna / p_group_heat_meth +
   plot_annotation(
     title = "A. EOBC biomarker expression/methylation map and RNA-TSS coupling",
     subtitle = "Group mean z-scores are shown for RNA expression and raw TSS methylation beta values. Raw RNA-TSS rho at right: negative rho supports promoter methylation-linked repression.",
-    caption = "Rows are ordered by the highest EOBC group for each biomarker. sample rho is across matched tumors; group rho is across the four EOBC group means. Domain strips mark OS, DepMap drug-response, or continuous TIL/TMB immune evidence.",
+    caption = "Rows are ordered by the highest EOBC group for each biomarker. sample rho is across matched tumors; * marks nominal Spearman p < 0.05. Domain strips mark OS, DepMap drug-response, or continuous TIL/TMB immune evidence.",
     theme = theme(
       plot.title = element_text(face = "bold", size = 16, color = "#111827"),
       plot.subtitle = element_text(size = 8.9, color = "#64748B", margin = margin(b = 5)),
@@ -1364,6 +1734,7 @@ state_domain_scatter_v3 <- function(df, domain, title, subtitle, status_values, 
     "immune_status"
   }
   lims <- domain_axis_limits(plot_df, fdr_thresholds)
+  color_legend_rows <- if (domain == "Immune") 2 else 1
 
   p <- ggplot(plot_df, aes(domain_x, domain_y))
   if (any(abs(fdr_thresholds - 0.25) < 1e-8)) {
@@ -1419,19 +1790,23 @@ state_domain_scatter_v3 <- function(df, domain, title, subtitle, status_values, 
     guides(
       fill = guide_legend(
         order = 1,
+        nrow = 2,
+        byrow = TRUE,
         override.aes = list(shape = 21, color = "#111827", size = 3.0, alpha = 1, stroke = 0.7)
       ),
       color = guide_legend(
         order = 2,
+        nrow = color_legend_rows,
+        byrow = TRUE,
         override.aes = list(shape = 21, fill = "white", size = 3.0, alpha = 1, stroke = 1.0)
       ),
-      size = guide_legend(order = 3),
-      shape = guide_legend(order = 4, override.aes = list(fill = "white", color = "#111827", size = 3.0))
+      size = guide_legend(order = 3, nrow = 1),
+      shape = guide_legend(order = 4, nrow = 1, override.aes = list(fill = "white", color = "#111827", size = 3.0))
     ) +
     theme_eobc(base_size = 8.4) +
     theme(
       legend.position = "bottom",
-      legend.box = "horizontal",
+      legend.box = "vertical",
       legend.margin = margin(t = 2, b = 2),
       legend.box.margin = margin(t = 2, b = 0),
       axis.text.x = element_text(size = 6.4),
@@ -1449,12 +1824,12 @@ p_os_state_v3 <- state_domain_scatter_v3(
   os_state_domain_v3,
   "OS",
   "C. OS evidence within EOBC group-defining biomarker programs",
-  "Coordinates show the best OS endpoint Cox beta and FDR; facets retain the EOBC program where each marker is dominant.",
+  "Coordinates show the best OS endpoint Cox beta and Cox regression p-value; facets retain the EOBC program where each marker is dominant.",
   os_cols,
   "OS evidence",
   "Figure_02A_OS_state_resolved_group_marker_evidence_R_v3",
   "Cox beta for best OS endpoint",
-  "-log10(OS Cox FDR), capped at 12",
+  "-log10(Cox regression p-value), capped at 12",
   "|Cox beta|",
   c(0.10, 0.05)
 )
@@ -1463,26 +1838,26 @@ p_depmap_state_v3 <- state_domain_scatter_v3(
   depmap_state_domain_v3,
   "DepMap",
   "D. DepMap drug-response evidence within EOBC group-defining programs",
-  "Coordinates show the signed DepMap drug-response association and its FDR; labels retain the best associated drug.",
+  "Coordinates show the signed DepMap drug-response Spearman rho and correlation p-value; labels retain the best associated drug.",
   drug_cols,
   "DepMap evidence",
   "Figure_03A_DepMap_state_resolved_group_marker_evidence_R_v3",
   "Signed DepMap association with drug response",
-  "-log10(DepMap FDR), capped at 12",
+  "-log10(DepMap drug-response Spearman p-value), capped at 12",
   "|DepMap rho|",
-  c(0.25, 0.10)
+  c(0.05)
 )
 
 p_immune_state_v3 <- state_domain_scatter_v3(
   immune_state_domain_v3,
   "Immune",
   "E. Immune evidence within EOBC group-defining biomarker programs",
-  "Coordinates show the strongest TIL/TMB Spearman rho and best FDR; labels report both signed rho values.",
+  "Coordinates show the strongest TIL/TMB Spearman rho and correlation p-value; labels report both signed rho values.",
   immune_cols,
   "Immune evidence",
   "Figure_04A_Immune_state_resolved_group_marker_evidence_R_v3",
   "Signed strongest TIL/TMB Spearman rho",
-  "-log10(best TIL/TMB FDR), capped at 12",
+  "-log10(TIL/TMB Spearman p-value), capped at 12",
   "|Best rho|",
   c(0.10, 0.05)
 )
@@ -1493,9 +1868,9 @@ v3_readme <- c(
   "V3 is the recommended publication-polish set.",
   "Figure_01A_EOBC_group_activity_coupling_heatmap_R_v3: group-level RNA expression and raw TSS methylation heatmap with RNA-TSS correlation and OS/DepMap/immune evidence strips.",
   "Figure_01B_RNA_TSS_methylation_correlation_matrix_R_v3: matched RNA-vs-TSS methylation correlation matrix.",
-  "Figure_02A_OS_state_resolved_group_marker_evidence_R_v3: OS evidence plotted by Cox beta and OS FDR within EOBC state marker programs.",
-  "Figure_03A_DepMap_state_resolved_group_marker_evidence_R_v3: DepMap evidence plotted by signed drug-response association and DepMap FDR within EOBC state marker programs.",
-  "Figure_04A_Immune_state_resolved_group_marker_evidence_R_v3: immune evidence plotted by strongest TIL/TMB rho and best TIL/TMB FDR within EOBC state marker programs.",
+  "Figure_02A_OS_state_resolved_group_marker_evidence_R_v3: OS evidence plotted by Cox beta and Cox regression p-value within EOBC state marker programs.",
+  "Figure_03A_DepMap_state_resolved_group_marker_evidence_R_v3: DepMap evidence plotted by signed drug-response Spearman rho and correlation p-value within EOBC state marker programs.",
+  "Figure_04A_Immune_state_resolved_group_marker_evidence_R_v3: immune evidence plotted by strongest TIL/TMB Spearman rho and correlation p-value within EOBC state marker programs.",
   "",
   "Interpretation note: TSS methylation is shown as raw beta-value z-scores in group maps. Raw RNA-TSS correlations are retained in the correlation panels; negative rho is the biologically expected direction for promoter repression."
 )
@@ -1623,7 +1998,7 @@ p_traj_immune_v2 <- plot_domain_trajectory_v2(
   "Immune",
   immune_count,
   immune_balance,
-  c("Positive rho-linked" = "#17A2A4", "Negative rho-linked" = "#72A950", "Discordant TIL/TMB rho" = "#B9C4D1", "Mixed score evidence" = "#D1D9E6", "No immune evidence" = "white"),
+  c("posi" = "#17A2A4", "nega" = "#72A950", "Mixed score evidence" = "#D1D9E6", "No immune evidence" = "white"),
   "H. TIL/TMB immune evidence on EOBC biological-family trajectories",
   "Lines show group mean biomarker-family activity; bubbles count markers with significant TIL-score or TMB-log1p Spearman association (FDR < 0.10), with fill showing signed rho direction.",
   "Figure_05C_Immune_annotated_family_trajectory_R_v2"

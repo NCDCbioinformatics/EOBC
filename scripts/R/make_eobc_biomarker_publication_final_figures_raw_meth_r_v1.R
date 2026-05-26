@@ -85,10 +85,33 @@ publication_theme <- theme(
 )
 
 state_guides <- guides(
-  fill = guide_legend(nrow = 1, byrow = TRUE, order = 1),
-  color = guide_legend(nrow = 1, byrow = TRUE, order = 2),
-  size = guide_legend(nrow = 1, byrow = TRUE, order = 3),
-  shape = guide_legend(nrow = 1, byrow = TRUE, order = 4)
+  fill = guide_legend(
+    nrow = 2, byrow = TRUE, order = 1,
+    override.aes = list(shape = 21, color = "#111827", size = 3.0, alpha = 1, stroke = 0.7)
+  ),
+  color = guide_legend(
+    nrow = 1, byrow = TRUE, order = 2,
+    override.aes = list(shape = 21, fill = "white", size = 3.0, alpha = 1, stroke = 1.0)
+  ),
+  size = guide_legend(
+    nrow = 1, byrow = TRUE, order = 3,
+    override.aes = list(shape = 21, color = "#111827", fill = "white", alpha = 1)
+  )
+)
+
+immune_state_guides <- guides(
+  fill = guide_legend(
+    nrow = 2, byrow = TRUE, order = 1,
+    override.aes = list(shape = 21, color = "#111827", size = 3.0, alpha = 1, stroke = 0.7)
+  ),
+  color = guide_legend(
+    nrow = 2, byrow = TRUE, order = 2,
+    override.aes = list(shape = 21, fill = "white", size = 3.0, alpha = 1, stroke = 1.0)
+  ),
+  size = guide_legend(
+    nrow = 1, byrow = TRUE, order = 3,
+    override.aes = list(shape = 21, color = "#111827", fill = "white", alpha = 1)
+  )
 )
 
 trajectory_guides <- guides(
@@ -133,30 +156,57 @@ if (exists("p_cor_matrix_v3")) {
   )
 }
 
-if (exists("p_os_state_v3")) {
+if (exists("p_os_state_v2")) {
   save_final(
-    p_os_state_v3 + publication_theme + state_guides,
+    p_os_state_v2 + publication_theme + state_guides,
     "Figure_1C_OS_evidence_projected_on_EOBC_group_markers",
-    width = 15.2,
-    height = 10.2
+    width = 15.8,
+    height = 10.4
   )
 }
 
-if (exists("p_depmap_state_v3")) {
+if (exists("p_depmap_state_v2")) {
   save_final(
-    p_depmap_state_v3 + publication_theme + state_guides,
+    p_depmap_state_v2 + publication_theme + state_guides,
     "Figure_1D_DepMap_evidence_projected_on_EOBC_group_markers",
     width = 15.8,
     height = 10.4
   )
 }
 
-if (exists("p_immune_state_v3")) {
+if (exists("p_immune_state_v2")) {
   save_final(
-    p_immune_state_v3 + publication_theme + state_guides,
+    p_immune_state_v2 + publication_theme + immune_state_guides,
     "Figure_1E_Immune_evidence_projected_on_EOBC_group_markers",
     width = 15.8,
     height = 10.4
+  )
+}
+
+if (exists("p_os_biomarker_summary_v1")) {
+  save_final(
+    p_os_biomarker_summary_v1,
+    "Figure_S2A_OS_significant_biomarker_summary_no_group",
+    width = 11.6,
+    height = 6.5
+  )
+}
+
+if (exists("p_depmap_biomarker_summary_v1")) {
+  save_final(
+    p_depmap_biomarker_summary_v1,
+    "Figure_S2B_DepMap_significant_biomarker_summary_no_group",
+    width = 12.2,
+    height = 7.4
+  )
+}
+
+if (exists("p_immune_biomarker_summary_v1")) {
+  save_final(
+    p_immune_biomarker_summary_v1,
+    "Figure_S2C_Immune_significant_biomarker_summary_no_group",
+    width = 12.2,
+    height = 8.0
   )
 }
 
@@ -216,9 +266,12 @@ panel_manifest <- tribble(
   ~final_panel, ~final_basename, ~source_or_object, ~recommended_use, ~interpretation_note,
   "1A", "Figure_1A_EOBC_biomarker_activity_heatmap_with_RNA_TSS_coupling", "Figure_01A_activity_heatmap_with_rna_meth_correlation_R_v1", "Main figure", "Tumors are ordered by EOBC group/pseudotime; methylation rows are raw TSS beta-value z-scores.",
   "1B", "Figure_1B_RNA_TSS_methylation_coupling_matrix", "p_cor_matrix_v3", "Main figure", "Raw RNA versus raw TSS methylation Spearman rho; negative diagonal correlations support promoter/TSS-linked repression.",
-  "1C", "Figure_1C_OS_evidence_projected_on_EOBC_group_markers", "p_os_state_v3", "Main figure", "OS-linked group-defining markers are plotted by best-endpoint Cox beta and OS FDR within EOBC state programs.",
-  "1D", "Figure_1D_DepMap_evidence_projected_on_EOBC_group_markers", "p_depmap_state_v3", "Main figure", "DepMap sensitivity/resistance evidence is plotted by signed drug-response association and DepMap FDR within EOBC state programs.",
-  "1E", "Figure_1E_Immune_evidence_projected_on_EOBC_group_markers", "p_immune_state_v3", "Main figure", "TIL/TMB immune evidence is plotted by strongest signed Spearman rho and best TIL/TMB FDR within EOBC state programs.",
+  "1C", "Figure_1C_OS_evidence_projected_on_EOBC_group_markers", "p_os_state_v2", "Main figure", "Nominal Cox regression p < 0.05 OS-linked markers are projected onto the group-defining contrast/Kruskal-Wallis coordinate system; point size encodes best-endpoint Cox regression p-value.",
+  "1D", "Figure_1D_DepMap_evidence_projected_on_EOBC_group_markers", "p_depmap_state_v2", "Main figure", "DepMap-linked markers are projected onto the group-defining contrast/Kruskal-Wallis coordinate system; point size encodes DepMap drug-response Spearman correlation p-value.",
+  "1E", "Figure_1E_Immune_evidence_projected_on_EOBC_group_markers", "p_immune_state_v2", "Main figure", "TIL/TMB immune-linked markers are projected onto the group-defining contrast/Kruskal-Wallis coordinate system; point size encodes TIL/TMB Spearman correlation p-value.",
+  "S2A", "Figure_S2A_OS_significant_biomarker_summary_no_group", "p_os_biomarker_summary_v1", "Supplement", "Domain-only nominal Cox regression p < 0.05 OS biomarker checklist without EOBC G1-G4 paneling.",
+  "S2B", "Figure_S2B_DepMap_significant_biomarker_summary_no_group", "p_depmap_biomarker_summary_v1", "Supplement", "Domain-only DepMap drug-response Spearman correlation p < 0.05 biomarker checklist without EOBC G1-G4 paneling.",
+  "S2C", "Figure_S2C_Immune_significant_biomarker_summary_no_group", "p_immune_biomarker_summary_v1", "Supplement", "Domain-only TIL/TMB Spearman correlation p < 0.05 biomarker checklist without EOBC G1-G4 paneling; immune status is simplified to posi/nega.",
   "1F", "Figure_1F_OS_evidence_on_EOBC_family_trajectories", "p_traj_os_v2", "Main or supporting figure", "Family-level EOBC trajectories annotated with counts/direction of OS-linked markers.",
   "1G", "Figure_1G_DepMap_evidence_on_EOBC_family_trajectories", "p_traj_depmap_v2", "Main or supporting figure", "Family-level EOBC trajectories annotated with drug-response-linked marker counts.",
   "1H", "Figure_1H_Immune_evidence_on_EOBC_family_trajectories", "p_traj_immune_v2", "Main or supporting figure", "Family-level EOBC trajectories annotated with immune-linked marker counts.",
@@ -248,16 +301,17 @@ readme <- c(
   "",
   "1. Figure 1A: tumor-level RNA expression/raw TSS methylation heatmap with RNA-TSS coupling and domain evidence strips.",
   "2. Figure 1B: raw RNA versus raw TSS methylation coupling matrix.",
-  "3. Figure 1C: OS evidence plotted by best-endpoint Cox beta and OS FDR within EOBC group-defining marker programs.",
-  "4. Figure 1D: DepMap drug-response evidence plotted by signed association and DepMap FDR within EOBC group-defining marker programs.",
-  "5. Figure 1E: TIL/TMB immune evidence plotted by strongest signed rho and best immune FDR within EOBC group-defining marker programs.",
-  "6. Figure 1F-H: family-trajectory summaries annotated by OS, DepMap, and immune evidence.",
+  "3. Figure 1C: OS evidence plotted for nominal Cox regression p < 0.05 best-endpoint hits within EOBC group-defining marker programs; point size encodes Cox regression p-value.",
+  "4. Figure 1D: DepMap drug-response evidence plotted for Spearman correlation p < 0.05 best-drug hits within EOBC group-defining marker programs; point size encodes DepMap drug-response Spearman p-value.",
+  "5. Figure 1E: TIL/TMB immune evidence plotted for Spearman correlation p < 0.05 hits within EOBC group-defining marker programs; point size encodes the best TIL/TMB Spearman p-value.",
+  "6. Figure S2A-C: domain-only significant biomarker summaries for OS, DepMap, and immune evidence without EOBC G1-G4 paneling.",
+  "7. Figure 1F-H: family-trajectory summaries annotated by OS, DepMap, and immune evidence.",
   "",
   "## Interpretation notes",
   "",
   "- EOBC group order is fixed as G1 | H, G2 | I, G3 | L-like, G4 | L.",
   "- TSS/promoter methylation panels use raw beta-value z-scores; high methylation is shown directly without direction flipping.",
-  "- In heatmap coupling strips, sample rho is the matched-tumor Spearman correlation and group rho is the Spearman correlation across the four EOBC group means.",
+  "- In heatmap coupling strips, sample rho is the matched-tumor Spearman correlation; * marks nominal Spearman p < 0.05.",
   "- RNA-TSS correlation panels retain raw methylation values; negative Spearman rho is the expected direction for promoter/TSS methylation-linked transcriptional repression.",
   "- DepMap evidence excludes Other/exploratory drug classes in final Sankey-style and evidence-overlay interpretation.",
   "- Immune evidence is based on continuous TIL score and TMB log1p Spearman association tests; no externally assigned immune hot/cold subtype is used.",
