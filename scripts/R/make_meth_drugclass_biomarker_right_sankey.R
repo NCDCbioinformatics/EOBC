@@ -260,6 +260,14 @@ format_p_compact <- function(x) {
   )
 }
 
+depmap_class_label <- function(x) {
+  x <- coalesce(as.character(x), "Drug class n/a")
+  x %>%
+    str_replace_all("Mitotic/Cell-cycle", "Mitotic/cell-cycle") %>%
+    str_replace_all("DDR/Checkpoint", "DDR/checkpoint") %>%
+    str_replace_all("Other/Experimental", "Other/experimental")
+}
+
 clean_label <- function(x) {
   x %>%
     str_replace_all("_", " ") %>%
@@ -940,6 +948,7 @@ story_source_routes <- bind_rows(
       pathway_program_source = pathway_subclass(Family6_source, gene_clean, target_label),
       route_type = "OS",
       evidence_summary = paste0("OS | ", domain_status),
+      evidence_display = evidence_summary,
       route_weight = pmin(0.86, 0.32 + 0.065 * pmin(domain_y, 5)),
       evidence_details = paste(os_best_endpoint, domain_status, format_p_compact(domain_p)),
       max_activity_contrast_z = activity_contrast_z
@@ -958,6 +967,7 @@ story_source_routes <- bind_rows(
       pathway_program_source = pathway_subclass(Family6_source, gene_clean, target_label),
       route_type = "DepMap",
       evidence_summary = paste0("DepMap | ", domain_status),
+      evidence_display = paste0("DepMap | ", depmap_class_label(drug_class_clean), " ", domain_status),
       route_weight = pmin(0.82, 0.30 + 0.060 * pmin(domain_y, 5)),
       evidence_details = paste(drug_clean, domain_status, format_p_compact(domain_p)),
       max_activity_contrast_z = activity_contrast_z
@@ -980,6 +990,7 @@ story_source_routes <- bind_rows(
         domain_status == "nega" ~ "Immune | TIL/TMB negative",
         TRUE ~ "Immune | TIL/TMB weak"
       ),
+      evidence_display = evidence_summary,
       route_weight = pmin(0.82, 0.30 + 0.060 * pmin(domain_y, 5)),
       evidence_details = paste0(
         "TIL rho ", sprintf("%.2f", til_activity_rho),
@@ -1056,7 +1067,7 @@ routes_story <- story_source_routes %>%
   group_by(
     gene_clean, EOBC_group, Family6, pathway_program, biomarker_node,
     source_layer_label, feature_layer_label, meth_rna_class,
-    rf_METH, rf_RNA, rf_dom, rf_layer_label, route_type, evidence_summary
+    rf_METH, rf_RNA, rf_dom, rf_layer_label, route_type, evidence_summary, evidence_display
   ) %>%
   summarise(
     route_weight = max(route_weight, na.rm = TRUE),
@@ -1371,18 +1382,21 @@ plot_sankey <- function(df, title, subtitle, width, height, outfile_stub, label_
 }
 
 plot_story_sankey <- function(df, title, subtitle, width, height, outfile_stub, label_size = 2.05) {
-  evidence_order <- c(
-    "OS | Protective", "OS | Adverse",
-    "DepMap | Sensitive", "DepMap | Resistant",
-    "Immune | TIL/TMB positive", "Immune | TIL/TMB negative", "Immune | TIL/TMB weak"
-  )
+  if (!"evidence_display" %in% names(df)) {
+    df <- df %>% mutate(evidence_display = evidence_summary)
+  }
 
   df_plot <- df %>%
     mutate(
       `EOBC state` = unname(group_display[as.character(EOBC_group)]),
       `EOBC state` = if_else(is.na(`EOBC state`), as.character(EOBC_group), `EOBC state`),
       `Terminal biomarker` = compact_biomarker_label(biomarker_node),
-      `Evidence domain` = evidence_summary
+      evidence_display = coalesce(evidence_display, evidence_summary),
+      evidence_label_short = evidence_display %>%
+        str_remove("^OS \\|\\s*") %>%
+        str_remove("^DepMap \\|\\s*") %>%
+        str_remove("^Immune \\|\\s*"),
+      `Evidence domain` = paste0(unname(group_short[as.character(EOBC_group)]), " | ", route_type, "\n", evidence_label_short)
     )
 
   state_levels <- unname(group_display[group_order])
@@ -1391,7 +1405,24 @@ plot_story_sankey <- function(df, title, subtitle, width, height, outfile_stub, 
     arrange(EOBC_group, biomarker_set, Family6, gene_clean) %>%
     pull(`Terminal biomarker`) %>%
     unique()
-  evidence_levels <- evidence_order[evidence_order %in% df_plot$`Evidence domain`]
+  evidence_levels <- df_plot %>%
+    distinct(`Evidence domain`, EOBC_group, route_type, evidence_summary, evidence_display) %>%
+    mutate(
+      group_rank = match(as.character(EOBC_group), group_order),
+      route_rank = case_when(
+        route_type == "OS" ~ 1L,
+        route_type == "Immune" ~ 2L,
+        route_type == "DepMap" ~ 3L,
+        TRUE ~ 9L
+      ),
+      direction_rank = case_when(
+        str_detect(evidence_summary, "Protective|positive|Sensitive") ~ 1L,
+        str_detect(evidence_summary, "Adverse|negative|Resistant") ~ 2L,
+        TRUE ~ 3L
+      )
+    ) %>%
+    arrange(group_rank, route_rank, direction_rank, evidence_display, `Evidence domain`) %>%
+    pull(`Evidence domain`)
 
   df_plot <- df_plot %>%
     mutate(
@@ -1408,18 +1439,18 @@ plot_story_sankey <- function(df, title, subtitle, width, height, outfile_stub, 
       evidence_col <- evidence_color_for_node(e)
       biomarker_col <- boost_col(mix_cols(
         c(group_col, family_col, pick_col(meth_rna_cols, m), pick_col(rf_dom_cols, r), pick_col(biomarker_set_cols, b)),
-        c(0.54, 0.18, 0.10, 0.08, 0.10)
+        c(0.72, 0.12, 0.06, 0.05, 0.05)
       ), sat = 1.08, val = 1.02)
 
       c(
-        stage1_color = boost_col(mix_cols(c(group_col, family_col), c(0.92, 0.08)), sat = 1.08, val = 1.02),
-        stage2_color = biomarker_col,
-        stage3_color = boost_col(mix_cols(c(group_col, evidence_col), c(0.50, 0.50)), sat = 1.08, val = 1.02)
+        stage1_color = boost_col(mix_cols(c(group_col, family_col), c(0.96, 0.04)), sat = 1.10, val = 1.02),
+        stage2_color = boost_col(mix_cols(c(group_col, biomarker_col, family_col), c(0.60, 0.30, 0.10)), sat = 1.08, val = 1.02),
+        stage3_color = boost_col(mix_cols(c(group_col, evidence_col, family_col, biomarker_col), c(0.62, 0.22, 0.08, 0.08)), sat = 1.10, val = 1.02)
       )
     },
     as.character(df_plot$EOBC_group),
     as.character(df_plot$Family6),
-    as.character(df_plot$`Evidence domain`),
+    as.character(df_plot$evidence_summary),
     as.character(df_plot$biomarker_set),
     as.character(df_plot$rf_dom),
     as.character(df_plot$meth_rna_class),
@@ -1452,7 +1483,7 @@ plot_story_sankey <- function(df, title, subtitle, width, height, outfile_stub, 
     mutate(
       biomarker_fill = mapply(
         function(g_col, f_col, s_col, m_col) {
-          boost_col(mix_cols(c(g_col, f_col, s_col, m_col), c(0.55, 0.18, 0.12, 0.15)), sat = 1.08, val = 1.02)
+          boost_col(mix_cols(c(g_col, f_col, s_col, m_col), c(0.74, 0.12, 0.06, 0.08)), sat = 1.08, val = 1.02)
         },
         group_mix, family_mix, set_mix, meth_mix,
         USE.NAMES = FALSE
@@ -1464,12 +1495,12 @@ plot_story_sankey <- function(df, title, subtitle, width, height, outfile_stub, 
     group_by(`Evidence domain`) %>%
     summarise(
       group_mix = mix_cols(vapply(EOBC_group, function(g) pick_col(group_node_cols, g), character(1)), route_weight),
-      evidence_tone = evidence_color_for_node(first(as.character(`Evidence domain`))),
+      evidence_tone = evidence_color_for_node(first(as.character(evidence_summary))),
       .groups = "drop"
     ) %>%
     mutate(
       evidence_fill = mapply(
-        function(g_col, e_col) boost_col(mix_cols(c(g_col, e_col), c(0.46, 0.54)), sat = 1.08, val = 1.02),
+        function(g_col, e_col) boost_col(mix_cols(c(g_col, e_col), c(0.72, 0.28)), sat = 1.08, val = 1.02),
         group_mix, evidence_tone,
         USE.NAMES = FALSE
       )
@@ -1518,7 +1549,7 @@ plot_story_sankey <- function(df, title, subtitle, width, height, outfile_stub, 
     geom_flow(
       aes(fill = lode_fill),
       aes.flow = "forward",
-      alpha = 0.70,
+      alpha = 0.76,
       width = 0.108,
       knot.pos = 0.48,
       color = scales::alpha("white", 0.38),
@@ -1528,7 +1559,7 @@ plot_story_sankey <- function(df, title, subtitle, width, height, outfile_stub, 
     geom_flow(
       aes(fill = biomarker_set),
       aes.flow = "forward",
-      alpha = 0.10,
+      alpha = 0.045,
       width = 0.028,
       knot.pos = 0.49,
       color = NA,
@@ -1564,7 +1595,8 @@ plot_story_sankey <- function(df, title, subtitle, width, height, outfile_stub, 
       fill = "Biomarker evidence set",
       caption = paste(
         "Condensed Sankey of Figure 1C-E and Figure S2A-C evidence: only final significant OS, DepMap, and immune-linked marker routes are shown.",
-        "Ribbons start with EOBC-state color, pass through biomarker/family/Meth-RNA/RF tinting, and end with functional-evidence color.",
+        "Functional evidence nodes are split by EOBC state; DepMap endpoints are further split by drug class and sensitivity/resistance.",
+        "Ribbons keep EOBC-state color as the main hue, then receive subtle biomarker/family/Meth-RNA/RF and functional-evidence tinting.",
         "OS uses nominal Cox p < 0.05; DepMap uses AUC/IC50 dose-response curve p < 0.05; immune routes require concordant non-zero TIL/TMB directions after excluding six zero-TMB samples for TMB correlations.",
         sep = "\n"
       )
@@ -1611,30 +1643,30 @@ copy_plot_alias <- function(source_stub, alias_stub) {
 plot_story_sankey(
   routes_story,
   title = "EOBC biomarker functional-evidence Sankey",
-  subtitle = "Condensed view of Figure 1C-E and Figure S2A-C: EOBC-state METH/RNA biomarkers are linked only to final significant OS, DepMap, and TIL/TMB evidence.",
+  subtitle = "Condensed view of Figure 1C-E and Figure S2A-C: final significant evidence is grouped by EOBC state, with DepMap split by drug class.",
   width = 20.5,
   height = 12.0,
-  outfile_stub = "Figure_10C_EOBC_METH_group_pathway_evidence_biomarker_right_sankey_full_R_v13",
-  label_size = 1.72
+  outfile_stub = "Figure_10C_EOBC_METH_group_pathway_evidence_biomarker_right_sankey_full_R_v14",
+  label_size = 1.60
 )
 
 plot_story_sankey(
   routes_story_priority,
   title = "Priority EOBC biomarker functional-evidence Sankey",
-  subtitle = "Focused marker view retaining OS-linked and multi-domain biomarkers from the final Figure S2A-C evidence set.",
+  subtitle = "Focused marker view retaining OS-linked and multi-domain biomarkers; endpoint evidence remains grouped by EOBC state.",
   width = 18.5,
   height = 9.5,
-  outfile_stub = "Figure_10D_EOBC_METH_group_pathway_evidence_biomarker_right_sankey_priority_R_v13",
-  label_size = 1.90
+  outfile_stub = "Figure_10D_EOBC_METH_group_pathway_evidence_biomarker_right_sankey_priority_R_v14",
+  label_size = 1.78
 )
 
 copy_plot_alias(
-  source_stub = "Figure_10C_EOBC_METH_group_pathway_evidence_biomarker_right_sankey_full_R_v13",
+  source_stub = "Figure_10C_EOBC_METH_group_pathway_evidence_biomarker_right_sankey_full_R_v14",
   alias_stub = "Figure_10C_EOBC_METH_group_pathway_evidence_biomarker_right_sankey_full_R_v12"
 )
 
 copy_plot_alias(
-  source_stub = "Figure_10D_EOBC_METH_group_pathway_evidence_biomarker_right_sankey_priority_R_v13",
+  source_stub = "Figure_10D_EOBC_METH_group_pathway_evidence_biomarker_right_sankey_priority_R_v14",
   alias_stub = "Figure_10D_EOBC_METH_group_pathway_evidence_biomarker_right_sankey_priority_R_v12"
 )
 
