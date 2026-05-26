@@ -59,6 +59,13 @@ group_display <- c(
   "G4 | L" = "G4 | L\nLuminal\nEOBC state"
 )
 
+group_short <- c(
+  "G1 | H" = "G1",
+  "G2 | I" = "G2",
+  "G3 | L-like" = "G3",
+  "G4 | L" = "G4"
+)
+
 group_node_cols <- c(
   "G1 | H" = "#D81B60",
   "G2 | I" = "#F59E0B",
@@ -562,6 +569,49 @@ alignment_prepped <- alignment %>%
     )
   )
 
+feature_group_summary <- dominance %>%
+  mutate(
+    gene_clean = gene,
+    layer_short = case_when(
+      display_layer == "TSS methylation" ~ "METH",
+      display_layer == "RNA expression" ~ "RNA",
+      TRUE ~ NA_character_
+    ),
+    feature_group = unname(group_short[as.character(activity_dominant_group)]),
+    feature_fdr = suppressWarnings(as.numeric(kw_fdr)),
+    feature_sig = is.finite(feature_fdr) & feature_fdr <= 0.05
+  ) %>%
+  filter(layer_short %in% c("METH", "RNA")) %>%
+  group_by(gene_clean, layer_short) %>%
+  arrange(feature_fdr, .by_group = TRUE) %>%
+  summarise(
+    feature_group = first(feature_group),
+    feature_fdr = first(feature_fdr),
+    feature_sig = any(feature_sig, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  pivot_wider(
+    names_from = layer_short,
+    values_from = c(feature_group, feature_fdr, feature_sig),
+    names_glue = "{layer_short}_{.value}"
+  ) %>%
+  mutate(
+    METH_feature_sig = coalesce(METH_feature_sig, FALSE),
+    RNA_feature_sig = coalesce(RNA_feature_sig, FALSE),
+    meth_feature_label = if_else(
+      METH_feature_sig & !is.na(METH_feature_group),
+      paste0("METH ", METH_feature_group),
+      "METH n.s."
+    ),
+    rna_feature_label = if_else(
+      RNA_feature_sig & !is.na(RNA_feature_group),
+      paste0("RNA ", RNA_feature_group),
+      "RNA n.s."
+    ),
+    feature_layer_label = paste(meth_feature_label, rna_feature_label, sep = " | ")
+  )
+write_csv(feature_group_summary, file.path(table_dir, "meth_group_pathway_evidence_biomarker_right_sankey_feature_group_summary.csv"))
+
 meth_markers <- dominance %>%
   filter(display_layer == "TSS methylation") %>%
   mutate(
@@ -582,6 +632,11 @@ meth_markers <- dominance %>%
       select(gene_clean, rf_METH, rf_RNA, rf_dom, rf_layer_label),
     by = "gene_clean"
   ) %>%
+  left_join(
+    feature_group_summary %>%
+      select(gene_clean, feature_layer_label, METH_feature_group, RNA_feature_group, METH_feature_sig, RNA_feature_sig),
+    by = "gene_clean"
+  ) %>%
   mutate(
     rna_support_class = coalesce(rna_support_class, "Meth-RNA weak"),
     meth_rna_class = rna_support_class,
@@ -589,7 +644,8 @@ meth_markers <- dominance %>%
     rf_RNA = coalesce(rf_RNA, 0),
     rf_dom = coalesce(rf_dom, "RF n/a"),
     rf_layer_label = coalesce(rf_layer_label, "RF n/a"),
-    biomarker_node = paste0(marker_label, "\n", rna_support_class, "\n", rf_layer_label)
+    feature_layer_label = coalesce(feature_layer_label, "METH n.s. | RNA n.s."),
+    biomarker_node = paste0(marker_label, "\n", feature_layer_label, "\n", rna_support_class, "\n", rf_layer_label)
   )
 
 depmap_routes <- depmap_all %>%
@@ -622,6 +678,7 @@ depmap_routes <- depmap_all %>%
     meth_markers %>%
       select(
         gene_clean, EOBC_group, Family6, pathway_program, biomarker_node,
+        feature_layer_label,
         meth_rna_class,
         rf_METH, rf_RNA, rf_dom, rf_layer_label,
         activity_contrast_z, group_weight, neg_log10_fdr
@@ -642,6 +699,7 @@ os_routes <- meth_markers %>%
     pathway_program,
     evidence_node = evidence_from_os(os_status, os_activity_direction),
     biomarker_node,
+    feature_layer_label,
     meth_rna_class,
     rf_METH,
     rf_RNA,
@@ -685,6 +743,7 @@ immune_routes <- meth_markers %>%
     pathway_program,
     evidence_node = recomputed_immune_evidence,
     biomarker_node,
+    feature_layer_label,
     meth_rna_class,
     rf_METH,
     rf_RNA,
@@ -715,6 +774,7 @@ depmap_routes_for_bind <- depmap_routes %>%
     pathway_program,
     evidence_node,
     biomarker_node,
+    feature_layer_label,
     meth_rna_class,
     rf_METH,
     rf_RNA,
@@ -780,7 +840,7 @@ routes_priority <- routes_full %>%
   filter(gene_clean %in% priority_genes)
 
 biomarker_summary <- routes_full %>%
-  group_by(gene_clean, biomarker_node, EOBC_group, Family6, pathway_program, biomarker_set, meth_rna_class, rf_METH, rf_RNA, rf_dom, rf_layer_label) %>%
+  group_by(gene_clean, biomarker_node, feature_layer_label, EOBC_group, Family6, pathway_program, biomarker_set, meth_rna_class, rf_METH, rf_RNA, rf_dom, rf_layer_label) %>%
   summarise(
     n_routes = n(),
     has_os = any(route_type == "OS"),
@@ -798,7 +858,7 @@ write_csv(routes_priority, file.path(table_dir, "meth_group_pathway_evidence_bio
 write_csv(biomarker_summary, file.path(table_dir, "meth_group_pathway_evidence_biomarker_right_sankey_biomarker_summary.csv"))
 write_csv(depmap_routes, file.path(table_dir, "meth_group_pathway_evidence_biomarker_right_sankey_depmap_drugclass_routes.csv"))
 
-plot_sankey <- function(df, title, subtitle, width, height, outfile_stub, label_size = 2.25) {
+plot_sankey <- function(df, title, subtitle, width, height, outfile_stub, label_size = 2.05) {
   df_plot <- df %>%
     mutate(
       `EOBC methylation state` = unname(group_display[as.character(EOBC_group)]),
@@ -1011,7 +1071,7 @@ plot_sankey <- function(df, title, subtitle, width, height, outfile_stub, label_
       stat = "stratum",
       aes(label = after_stat(stratum)),
       size = label_size,
-      lineheight = 0.86,
+      lineheight = 0.82,
       color = "#111827",
       fontface = "bold"
     ) +
@@ -1029,7 +1089,7 @@ plot_sankey <- function(df, title, subtitle, width, height, outfile_stub, label_
       fill = "Biomarker evidence set",
       caption = paste(
         "Ribbon hues keep EOBC-state identity across the route, then receive subtle biological-program, biomarker Meth-RNA/RF, and evidence-domain tints.",
-        "Terminal biomarker and evidence-domain boxes use group-weighted blends so group-to-evidence routes remain visually traceable. Labels show Meth-RNA class plus RF methylation/RNA scores.",
+        "Terminal biomarker labels show significant METH/RNA EOBC feature groups, Meth-RNA class, and RF methylation/RNA scores.",
         "OS routes require KM log-rank p < 0.05. DepMap uses curated drug classes only. TMB-log1p zero outliers are excluded only for TMB correlations.",
         sep = "\n"
       )
