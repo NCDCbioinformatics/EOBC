@@ -257,6 +257,12 @@ truthy <- function(x) {
   str_to_upper(as.character(x)) %in% c("TRUE", "T", "1", "YES", "Y")
 }
 
+first_nonempty <- function(x) {
+  x <- as.character(x)
+  x <- x[!is.na(x) & nzchar(x)]
+  if (length(x) == 0) NA_character_ else x[[1]]
+}
+
 clean_label <- function(x) {
   x %>%
     str_replace_all("_", " ") %>%
@@ -612,14 +618,21 @@ feature_group_summary <- dominance %>%
   )
 write_csv(feature_group_summary, file.path(table_dir, "meth_group_pathway_evidence_biomarker_right_sankey_feature_group_summary.csv"))
 
-meth_markers <- dominance %>%
-  filter(display_layer == "TSS methylation") %>%
+feature_markers_raw <- dominance %>%
+  filter(display_layer %in% c("TSS methylation", "RNA expression")) %>%
   mutate(
     gene_clean = gene,
     EOBC_group = factor(activity_dominant_group, levels = group_order),
+    source_layer = case_when(
+      display_layer == "TSS methylation" ~ "METH",
+      display_layer == "RNA expression" ~ "RNA",
+      TRUE ~ NA_character_
+    ),
     Family6 = if_else(Family6 %in% names(family_cols), Family6, "Immune"),
     pathway_program = pathway_subclass(Family6, gene_clean, target_label),
     marker_label = gene_clean,
+    kw_fdr = suppressWarnings(as.numeric(kw_fdr)),
+    feature_sig = is.finite(kw_fdr) & kw_fdr <= 0.05,
     group_weight = pmax(0.18, pmin(activity_contrast_z, 2.2)),
     neg_log10_fdr = pmin(coalesce(neg_log10_fdr, 0), 12),
     os_sig = truthy(os_sig),
@@ -648,11 +661,48 @@ meth_markers <- dominance %>%
     biomarker_node = paste0(marker_label, "\n", feature_layer_label, "\n", rna_support_class, "\n", rf_layer_label)
   )
 
+feature_marker_layers <- feature_markers_raw %>%
+  filter(feature_sig | os_sig | drug_sig | immune_sig) %>%
+  distinct(gene_clean, EOBC_group, source_layer)
+
+feature_markers <- feature_markers_raw %>%
+  filter(feature_sig | os_sig | drug_sig | immune_sig) %>%
+  arrange(gene_clean, EOBC_group, desc(group_weight), desc(neg_log10_fdr)) %>%
+  group_by(gene_clean, EOBC_group) %>%
+  summarise(
+    source_layer_label = paste(sort(unique(source_layer)), collapse = "+"),
+    Family6 = first(Family6),
+    pathway_program = first(pathway_program),
+    biomarker_node = first(biomarker_node),
+    feature_layer_label = first(feature_layer_label),
+    meth_rna_class = first(meth_rna_class),
+    rf_METH = first(rf_METH),
+    rf_RNA = first(rf_RNA),
+    rf_dom = first(rf_dom),
+    rf_layer_label = first(rf_layer_label),
+    group_weight = max(group_weight, na.rm = TRUE),
+    activity_contrast_z = max(activity_contrast_z, na.rm = TRUE),
+    neg_log10_fdr = max(neg_log10_fdr, na.rm = TRUE),
+    os_sig = any(os_sig, na.rm = TRUE),
+    drug_sig = any(drug_sig, na.rm = TRUE),
+    immune_sig = any(immune_sig, na.rm = TRUE),
+    os_status = first_nonempty(os_status[os_sig]),
+    os_activity_direction = first_nonempty(os_activity_direction[os_sig]),
+    immune_activity_quadrant = first_nonempty(immune_activity_quadrant[immune_sig]),
+    immune_status = first_nonempty(immune_status[immune_sig]),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    group_weight = if_else(is.finite(group_weight), group_weight, 0.18),
+    activity_contrast_z = if_else(is.finite(activity_contrast_z), activity_contrast_z, 0),
+    neg_log10_fdr = if_else(is.finite(neg_log10_fdr), neg_log10_fdr, 0)
+  )
+write_csv(feature_markers, file.path(table_dir, "meth_rna_union_group_marker_features_for_sankey.csv"))
+
 depmap_routes <- depmap_all %>%
-  filter(str_to_upper(omics) == "METH") %>%
-  filter(gene %in% meth_markers$gene_clean) %>%
   mutate(
     gene_clean = gene,
+    source_layer = str_to_upper(omics),
     drug_class = classify_drug(drug_clean),
     drug_direction = case_when(
       str_detect(str_to_lower(direction), "sensitive") ~ "Sensitive",
@@ -665,40 +715,53 @@ depmap_routes <- depmap_all %>%
     fdr = as.numeric(fdr),
     neglog10_fdr = -log10(pmax(fdr, 1e-300))
   ) %>%
+  filter(gene_clean %in% feature_markers$gene_clean) %>%
   filter(!is.na(fdr), fdr <= 0.25, !drug_class %in% c("Other/exploratory", "Experimental/natural")) %>%
   group_by(gene_clean, evidence_node, drug_class, drug_direction) %>%
   summarise(
     n_drugs = n(),
+    evidence_layers = paste(sort(unique(source_layer)), collapse = "+"),
     best_fdr = min(fdr, na.rm = TRUE),
     best_neglog10_fdr = max(neglog10_fdr, na.rm = TRUE),
     top_drugs = paste(head(unique(drug_label[order(fdr)]), 4), collapse = "; "),
     .groups = "drop"
   ) %>%
   left_join(
-    meth_markers %>%
+    feature_markers %>%
       select(
         gene_clean, EOBC_group, Family6, pathway_program, biomarker_node,
+        source_layer_label,
         feature_layer_label,
         meth_rna_class,
         rf_METH, rf_RNA, rf_dom, rf_layer_label,
         activity_contrast_z, group_weight, neg_log10_fdr
       ),
-    by = "gene_clean"
+    by = "gene_clean",
+    relationship = "many-to-many"
   ) %>%
   mutate(
     route_type = "DepMap",
     route_weight = group_weight * pmin(1.35, 0.60 + 0.13 * n_drugs + 0.06 * pmin(best_neglog10_fdr, 3))
   )
 
-os_routes <- meth_markers %>%
+os_gene_evidence <- feature_markers %>%
   filter(os_sig) %>%
+  group_by(gene_clean) %>%
+  summarise(
+    evidence_node = evidence_from_os(first_nonempty(os_status), first_nonempty(os_activity_direction)),
+    .groups = "drop"
+  )
+
+os_routes <- feature_markers %>%
+  inner_join(os_gene_evidence, by = "gene_clean") %>%
   transmute(
     gene_clean,
     EOBC_group,
     Family6,
     pathway_program,
-    evidence_node = evidence_from_os(os_status, os_activity_direction),
+    evidence_node,
     biomarker_node,
+    source_layer_label,
     feature_layer_label,
     meth_rna_class,
     rf_METH,
@@ -730,8 +793,7 @@ if (file.exists(os_km_filter_path)) {
   os_routes <- os_routes %>% filter(gene_clean %in% os_keep)
 }
 
-immune_routes <- meth_markers %>%
-  filter(immune_sig) %>%
+immune_routes <- feature_markers %>%
   left_join(immune_recomputed_wide, by = "gene_clean") %>%
   mutate(
     recomputed_immune_evidence = evidence_from_recomputed_til_tmb(TIL_rho, TMB_rho, TIL_q, TMB_q)
@@ -743,6 +805,7 @@ immune_routes <- meth_markers %>%
     pathway_program,
     evidence_node = recomputed_immune_evidence,
     biomarker_node,
+    source_layer_label,
     feature_layer_label,
     meth_rna_class,
     rf_METH,
@@ -774,6 +837,7 @@ depmap_routes_for_bind <- depmap_routes %>%
     pathway_program,
     evidence_node,
     biomarker_node,
+    source_layer_label,
     feature_layer_label,
     meth_rna_class,
     rf_METH,
@@ -840,7 +904,7 @@ routes_priority <- routes_full %>%
   filter(gene_clean %in% priority_genes)
 
 biomarker_summary <- routes_full %>%
-  group_by(gene_clean, biomarker_node, feature_layer_label, EOBC_group, Family6, pathway_program, biomarker_set, meth_rna_class, rf_METH, rf_RNA, rf_dom, rf_layer_label) %>%
+  group_by(gene_clean, biomarker_node, source_layer_label, feature_layer_label, EOBC_group, Family6, pathway_program, biomarker_set, meth_rna_class, rf_METH, rf_RNA, rf_dom, rf_layer_label) %>%
   summarise(
     n_routes = n(),
     has_os = any(route_type == "OS"),
@@ -1077,7 +1141,7 @@ plot_sankey <- function(df, title, subtitle, width, height, outfile_stub, label_
     ) +
     scale_x_discrete(
         limits = axis_names,
-        labels = c("EOBC state\n(raw TSS-METH)", "Biological\nprogram", "Terminal\nbiomarker", "Evidence\ndomain"),
+        labels = c("EOBC state\n(METH/RNA markers)", "Biological\nprogram", "Terminal\nbiomarker", "Evidence\ndomain"),
         expand = c(0.038, 0.020)
       ) +
     scale_fill_manual(values = fill_cols, breaks = names(biomarker_set_cols), drop = FALSE, na.value = "#E5E7EB") +
@@ -1088,7 +1152,7 @@ plot_sankey <- function(df, title, subtitle, width, height, outfile_stub, label_
       y = "Evidence-flow weight",
       fill = "Biomarker evidence set",
       caption = paste(
-        "Ribbon hues keep EOBC-state identity across the route, then receive subtle biological-program, biomarker Meth-RNA/RF, and evidence-domain tints.",
+        "Ribbon hues keep EOBC-state identity across METH/RNA union marker routes, then receive subtle biological-program, biomarker Meth-RNA/RF, and evidence-domain tints.",
         "Terminal biomarker labels show significant METH/RNA EOBC feature groups, Meth-RNA class, and RF methylation/RNA scores.",
         "OS routes require KM log-rank p < 0.05. DepMap uses curated drug classes only. TMB-log1p zero outliers are excluded only for TMB correlations.",
         sep = "\n"
@@ -1123,8 +1187,8 @@ plot_sankey <- function(df, title, subtitle, width, height, outfile_stub, label_
 
 plot_sankey(
   routes_full,
-  title = "EOBC raw TSS-methylation biomarker-set evidence Sankey",
-  subtitle = "Only harmonized functional evidence routes are shown: KM-significant OS, curated DepMap therapeutic classes, and continuous TIL/TMB associations.",
+  title = "EOBC METH/RNA group biomarker-set evidence Sankey",
+  subtitle = "Union of raw TSS-methylation and RNA-expression group markers is routed to KM-significant OS, curated DepMap classes, and continuous TIL/TMB associations.",
   width = 26.2,
   height = 15.2,
   outfile_stub = "Figure_10C_EOBC_METH_group_pathway_evidence_biomarker_right_sankey_full_R_v12",
@@ -1133,8 +1197,8 @@ plot_sankey(
 
 plot_sankey(
   routes_priority,
-  title = "Priority EOBC raw TSS-methylation biomarker-set evidence Sankey",
-  subtitle = "Focused view after harmonizing OS KM evidence and removing weak drug classes or unsupported immune categories.",
+  title = "Priority EOBC METH/RNA group biomarker-set evidence Sankey",
+  subtitle = "Focused METH/RNA union marker view after harmonizing OS KM evidence and removing weak drug classes or unsupported immune categories.",
   width = 24,
   height = 12.8,
   outfile_stub = "Figure_10D_EOBC_METH_group_pathway_evidence_biomarker_right_sankey_priority_R_v12",
